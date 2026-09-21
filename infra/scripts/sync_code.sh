@@ -41,6 +41,7 @@ echo ">> Extracting and setting up application on VM..."
 gcloud compute ssh --quiet "${INSTANCE}" --zone="${ZONE}" --command='
   set -euo pipefail
   echo ">> Unpacking archive to /opt/hasamex..."
+  sudo mkdir -p /opt/hasamex
   sudo tar -xzf /tmp/hasamex-deploy.tar.gz -C /opt/hasamex/
 
   if [ ! -d /opt/hasamex/.venv ]; then
