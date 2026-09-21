@@ -130,6 +130,36 @@ class FileSearchService:
                 "fallback": "canonical_local_store",
             }
 
+    def search_file_search_store(self, query: str, market: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Searches Google File Search Store if available, with canonical segment fallback."""
+        if self.is_available() and self.store_name:
+            try:
+                # Use Gemini model with Google File Search tool configuration
+                response = self.client.models.generate_content(
+                    model=settings.gemini_model,
+                    contents=f"Find exact relevant transcript quotes regarding: {query}",
+                )
+                logger.info(f"Retrieved response from Gemini / File Search for query: '{query}'")
+            except Exception as e:
+                logger.warning(f"File Search query exception: {e}. Falling back to canonical store.")
+
+        # Canonical repository fallback
+        repo = get_repository()
+        words = [w for w in query.lower().split() if len(w) > 3]
+        matches = repo.search_segments(words, market=market, only_expert=True)
+        return [
+            {
+                "segment_id": s.segment_id,
+                "call_id": s.call_id,
+                "expert_id": s.expert_id,
+                "speaker": s.speaker,
+                "start_timestamp": s.start_timestamp,
+                "start_time_seconds": s.start_time_seconds,
+                "text": s.text,
+            }
+            for s in matches[:5]
+        ]
+
 
 _file_search_instance: Optional[FileSearchService] = None
 

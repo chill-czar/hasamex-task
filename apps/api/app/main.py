@@ -29,7 +29,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -78,7 +78,7 @@ async def health_check():
 async def run_ingestion():
     """Re-syncs canonical transcripts and indexes into Google File Search Store."""
     repo = get_repository()
-    repo._initialize()
+    repo.reload()
     fs_service = get_file_search_service()
     fs_result = fs_service.initialize_store_and_index_transcripts()
 

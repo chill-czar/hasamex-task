@@ -1,7 +1,16 @@
 """Canonical data models for the Hasamex Expert Interview Analysis Platform."""
 
+from enum import Enum
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
+
+
+class DisagreementCategory(str, Enum):
+    AGREEMENT = "Agreement"
+    PARTIAL_AGREEMENT = "Partial agreement"
+    DIFFERENT_EMPHASIS = "Different emphasis"
+    CONTRADICTION = "Contradiction"
+    UNIQUE_VIEWPOINT = "Unique viewpoint"
 
 
 class Expert(BaseModel):
@@ -93,14 +102,6 @@ class ThemeItem(BaseModel):
     supporting_evidence: List[EvidenceItem]
 
 
-class DisagreementCategory(str):
-    AGREEMENT = "Agreement"
-    PARTIAL_AGREEMENT = "Partial agreement"
-    DIFFERENT_EMPHASIS = "Different emphasis"
-    CONTRADICTION = "Contradiction"
-    UNIQUE_VIEWPOINT = "Unique viewpoint"
-
-
 class ExpertStance(BaseModel):
     expert_id: str
     expert_name: str
@@ -112,7 +113,7 @@ class ExpertStance(BaseModel):
 class DisagreementItem(BaseModel):
     topic_id: str
     topic: str
-    category: str  # DisagreementCategory
+    category: DisagreementCategory
     explanation: str
     stances: List[ExpertStance]
 

@@ -152,17 +152,48 @@ class IntentRouter:
                         markets_covered=["France", "Germany", "United Kingdom"],
                     )
 
-            # Return overview of all 6 guide questions
+            # Return dynamically generated overview of all 6 guide questions
+            return self.analyzer.ask_question(
+                "Provide an executive overview synthesizing all 6 interview guide questions for the European Robotic Surgery study.",
+                market_filter=market_filter,
+            )
+
+        elif intent == self.CROSS_CALL_ANALYSIS:
+            # Dynamically synthesize cross-call analysis using live Gemini
+            return self.analyzer.ask_question(
+                f"Synthesize the overarching cross-call themes, differences, and key takeaways across France, Germany, and the UK: {query}",
+                market_filter=market_filter,
+            )
+
+        elif intent == self.EVIDENCE_LOOKUP:
+            search_results = transcript_search_tool(query, market=market_filter)
+            if not search_results:
+                return QueryAnswer(
+                    query=query,
+                    answer="No matching canonical transcript segments found for the requested search query.",
+                    has_sufficient_evidence=False,
+                    evidence=[],
+                    themes_detected=[],
+                    markets_covered=[],
+                )
+            evidence_items = []
+            for r in search_results:
+                enriched = self.repo.get_validator().enrich_evidence_item({
+                    "segment_id": r["segment_id"],
+                    "call_id": r["call_id"],
+                    "speaker": r["speaker"],
+                    "quote": r["text"],
+                })
+                if enriched:
+                    evidence_items.append(enriched)
+
             return QueryAnswer(
                 query=query,
-                answer=(
-                    f"The European Robotic Surgery interview guide comprises {len(analyses)} core questions covering "
-                    "current adoption, barriers, budgets/ROI, surgeon training, 3–5 year trends, and hospital purchasing timelines."
-                ),
-                has_sufficient_evidence=True,
-                evidence=[ea.evidence[0] for a in analyses[:3] for ea in a.expert_answers[:1] if ea.evidence],
-                themes_detected=["Interview Guide Overview"],
-                markets_covered=["France", "Germany", "United Kingdom"],
+                answer=f"Found {len(evidence_items)} matching canonical transcript segments in the database.",
+                has_sufficient_evidence=len(evidence_items) > 0,
+                evidence=evidence_items,
+                themes_detected=["Direct Canonical Evidence Lookup"],
+                markets_covered=list({e.market for e in evidence_items}),
             )
 
         # Fallback to grounded Q&A

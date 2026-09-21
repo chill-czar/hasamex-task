@@ -1,6 +1,15 @@
-"""Grounded analysis engine for Interview Guide, Themes, Disagreements, and Cross-Transcript Q&A."""
+"""Live Google Cloud Gemini Grounded Analysis Engine.
 
+Zero hardcoded answers: 100% of analytical answers, themes, disagreements,
+and Q&A responses are generated dynamically by Google Cloud Gemini (gemini-3.6-flash)
+and grounded against the authoritative PostgreSQL/SQLite canonical database via EvidenceValidator.
+"""
+
+import json
+import logging
 from typing import List, Optional, Dict, Any
+from google.genai import types
+from apps.api.app.config import settings
 from apps.api.app.models.canonical import (
     GuideQuestionAnalysis,
     ExpertAnswer,
@@ -12,948 +21,492 @@ from apps.api.app.models.canonical import (
     DisagreementCategory,
 )
 from apps.api.app.services.repository import CanonicalRepository, get_repository
+from apps.api.app.services.file_search import get_file_search_service
+
+logger = logging.getLogger("hasamex.analyzer")
+
+GUIDE_QUESTIONS = {
+    1: "How would you describe current adoption of robotic surgery in your market?",
+    2: "What are the main barriers to adoption?",
+    3: "How important are hospital budgets and ROI in purchasing decisions?",
+    4: "How important are surgeon training and clinical outcomes?",
+    5: "What adoption trend do you expect over the next 3–5 years?",
+    6: "What is the typical hospital decision-making timeline for purchasing a new robotic system?",
+}
 
 
 class GroundedAnalyzer:
-    """Analyzes expert transcripts with strict evidence grounding and canonical validation."""
+    """Analyzes expert transcripts using live Google Cloud Gemini models with canonical evidence grounding."""
 
     def __init__(self, repository: Optional[CanonicalRepository] = None):
         self.repo = repository or get_repository()
         self.validator = self.repo.get_validator()
-        self._guide_analyses_cache: Optional[List[GuideQuestionAnalysis]] = None
+        self.file_search = get_file_search_service()
+        self.client = None
+
+        if settings.is_gemini_available:
+            try:
+                import google.genai as genai
+                self.client = genai.Client(api_key=settings.gemini_api_key)
+                logger.info(f"Initialized Google GenAI Client with model: {settings.gemini_model}")
+            except Exception as e:
+                logger.error(f"Failed to initialize live GenAI client: {e}")
+
+        # In-memory session caches to avoid re-billing identical calls in the same user session
+        self._guide_analyses_cache: Dict[int, GuideQuestionAnalysis] = {}
         self._themes_cache: Optional[List[ThemeItem]] = None
         self._disagreements_cache: Optional[List[DisagreementItem]] = None
 
-    def get_interview_guide_analyses(self) -> List[GuideQuestionAnalysis]:
-        """Returns verified analyses for all 6 questions in the interview guide."""
-        if self._guide_analyses_cache is not None:
-            return self._guide_analyses_cache
+    def _get_transcripts_context(self, market_filter: Optional[str] = None) -> str:
+        """Builds formatted authoritative context from canonical transcript segments."""
+        blocks = []
+        for call in self.repo.get_all_calls():
+            if market_filter and market_filter.lower() not in call.market.lower():
+                continue
+            expert = self.repo.get_expert(call.expert_id)
+            expert_name = expert.name if expert else "Expert"
+            expert_role = expert.role if expert else ""
+            market = call.market
 
-        analyses: List[GuideQuestionAnalysis] = []
+            header = f"=== CALL_ID: {call.call_id} | EXPERT: {expert_name} ({expert_role}, {market}) ==="
+            dialogue = []
+            for seg in call.segments:
+                dialogue.append(f"[{seg.start_timestamp}] {seg.speaker}: {seg.text}")
+            blocks.append(header + "\n" + "\n".join(dialogue))
+        return "\n\n".join(blocks)
 
-        # Question 1: Current adoption
-        q1_expert_answers = [
-            ExpertAnswer(
-                expert_id="expert_fr_martin",
-                expert_name="Dr. Jean Martin",
-                market="France",
-                role="Head of Urology",
-                has_evidence=True,
-                perspective_summary="Adoption is steadily growing but remains heavily concentrated in academic hospitals and well-funded private centres, while regional hospitals lag.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "expert_id": "expert_fr_martin",
-                            "quote": "Adoption is growing, but it is still concentrated in larger academic hospitals and private centres with stronger capital budgets. Smaller regional hospitals are much slower.",
-                            "relevance": "Describes adoption distribution across hospital tiers in France",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_de_keller",
-                expert_name="Anna Keller",
-                market="Germany",
-                role="Former Hospital Procurement Director",
-                has_evidence=True,
-                perspective_summary="Characterizes German adoption as uneven; large university hospitals lead while smaller community hospitals wait.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_de_02",
-                            "expert_id": "expert_de_keller",
-                            "quote": "It is growing, but adoption is quite uneven. Large university hospitals are much more advanced, while many smaller hospitals are still waiting.",
-                            "relevance": "Procurement perspective on hospital stratification in Germany",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_gb_carter",
-                expert_name="Dr. Emily Carter",
-                market="United Kingdom",
-                role="Consultant Urologist",
-                has_evidence=True,
-                perspective_summary="Becoming standard for selected procedures in leading NHS trusts, yet geographic and institutional variation remains pronounced.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_uk_03",
-                            "expert_id": "expert_gb_carter",
-                            "quote": "Adoption is increasing, and in some larger NHS trusts robotic surgery is becoming standard for selected procedures. But access still varies significantly by hospital.",
-                            "relevance": "NHS adoption status and variation",
-                        }
-                    )
-                ],
-            ),
-        ]
-        analyses.append(
-            GuideQuestionAnalysis(
-                question_id=1,
-                question="How would you describe current adoption of robotic surgery in your market?",
-                synthesized_answer=(
-                    "Across all three European markets (France, Germany, and the UK), adoption is growing but highly stratified. "
-                    "Robotic systems are concentrated in major academic medical centres, university hospitals, and well-funded NHS trusts "
-                    "where procedure volumes and capital resources are highest. Smaller regional and community hospitals remain significantly "
-                    "slower or are still waiting on the sidelines."
-                ),
-                expert_answers=q1_expert_answers,
-                common_themes=[
-                    "Tiered adoption concentrated in academic and university centres",
-                    "Regional and smaller hospital lagging",
-                ],
-                contrasting_viewpoints=[
-                    "Agreement across all markets regarding institutional disparity",
-                ],
-            )
-        )
-
-        # Question 2: Main barriers to adoption
-        q2_expert_answers = [
-            ExpertAnswer(
-                expert_id="expert_fr_martin",
-                expert_name="Dr. Jean Martin",
-                market="France",
-                role="Head of Urology",
-                has_evidence=True,
-                perspective_summary="Capital budget approval and convincing purchasing committees of a sound economic case are the main bottlenecks.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "expert_id": "expert_fr_martin",
-                            "quote": "The biggest issue is still capital budget approval. Hospitals may like the technology clinically, but purchasing committees need a strong economic case before approving a system.",
-                            "relevance": "Primary French hospital barrier: capital approval",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_de_keller",
-                expert_name="Anna Keller",
-                market="Germany",
-                role="Former Hospital Procurement Director",
-                has_evidence=True,
-                perspective_summary="Capital cost under hospital financial pressure and the operational hurdle of proving sufficient procedure utilization.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_de_02",
-                            "expert_id": "expert_de_keller",
-                            "quote": "Cost is the first barrier. These are large capital purchases, and hospital finances are under pressure. The second issue is proving that the system will be used enough.",
-                            "relevance": "German procurement barrier: capital pressure and utilization proof",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_gb_carter",
-                expert_name="Dr. Emily Carter",
-                market="United Kingdom",
-                role="Consultant Urologist",
-                has_evidence=True,
-                perspective_summary="Identifies surgeon and theatre staff training capacity as equally critical to funding.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_uk_03",
-                            "expert_id": "expert_gb_carter",
-                            "quote": "Funding is important, but I would say training capacity is just as important. You can buy a system, but if you cannot train enough surgeons and theatre staff, adoption stalls.",
-                            "relevance": "UK barrier: human capital and training bottlenecks",
-                        }
-                    )
-                ],
-            ),
-        ]
-        analyses.append(
-            GuideQuestionAnalysis(
-                question_id=2,
-                question="What are the main barriers to adoption?",
-                synthesized_answer=(
-                    "Adoption barriers divide into financial gatekeeping and human capital constraints. "
-                    "In France and Germany, high capital cost and the need to justify return on investment to purchasing committees "
-                    "are cited as the primary hurdles. In the UK, while funding is acknowledged, training capacity for surgeons "
-                    "and theatre staff is emphasized as an equally decisive operational barrier that stalls adoption even when capital exists."
-                ),
-                expert_answers=q2_expert_answers,
-                common_themes=[
-                    "High upfront capital expenditure and committee approvals",
-                    "Operational utilization risk",
-                    "Training capacity and workforce enablement",
-                ],
-                contrasting_viewpoints=[
-                    "France and Germany emphasize capital committee approval and financial risk",
-                    "UK places equal weight on surgeon and theatre staff training bandwidth",
-                ],
-            )
-        )
-
-        # Question 3: Hospital budgets and ROI
-        q3_expert_answers = [
-            ExpertAnswer(
-                expert_id="expert_fr_martin",
-                expert_name="Dr. Jean Martin",
-                market="France",
-                role="Head of Urology",
-                has_evidence=True,
-                perspective_summary="ROI is crucial; the finance team requires procedure volume and maintenance cost justifications to ensure the system pays for itself.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "expert_id": "expert_fr_martin",
-                            "quote": "Very important. The clinical argument may get surgeons interested, but the finance team wants to understand utilisation, procedure volume, maintenance cost and whether the system will actually pay for itself.",
-                            "relevance": "Finance team ROI criteria in France",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_de_keller",
-                expert_name="Anna Keller",
-                market="Germany",
-                role="Former Hospital Procurement Director",
-                has_evidence=True,
-                perspective_summary="Procurement evaluates total cost of ownership (TCO) and maintenance; economic viability is the decisive approval factor.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_de_02",
-                            "expert_id": "expert_de_keller",
-                            "quote": "We look at total cost of ownership, expected procedure volume, maintenance, service contracts and training requirements. A strong clinical case helps, but the economic case decides whether it gets approved.",
-                            "relevance": "Decisive procurement economics in Germany",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_gb_carter",
-                expert_name="Dr. Emily Carter",
-                market="United Kingdom",
-                role="Consultant Urologist",
-                has_evidence=True,
-                perspective_summary="ROI is balanced against clinical strategy, patient length of stay, and staff recruitment rather than serving as a purely financial veto.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_uk_03",
-                            "expert_id": "expert_gb_carter",
-                            "quote": "It matters, but the discussion is not always purely financial. Hospitals also consider patient outcomes, length of stay, surgeon recruitment and whether the technology improves their clinical position.",
-                            "relevance": "Balanced ROI perspective in the UK NHS",
-                        }
-                    ),
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_uk_03",
-                            "expert_id": "expert_gb_carter",
-                            "quote": "I would say economics and clinical strategy are balanced. I would not say finance alone decides the purchase.",
-                            "relevance": "Strategic clinical vs financial balance",
-                        }
-                    ),
-                ],
-            ),
-        ]
-        analyses.append(
-            GuideQuestionAnalysis(
-                question_id=3,
-                question="How important are hospital budgets and ROI in purchasing decisions?",
-                synthesized_answer=(
-                    "There is a marked contrast between procurement-driven continental hospitals and the UK NHS. "
-                    "In Germany and France, financial ROI and Total Cost of Ownership (TCO) are decisive gatekeepers—the economic case "
-                    "determines whether a purchase is approved. Conversely, in the UK, ROI is evaluated in balance with clinical strategy, "
-                    "including patient length of stay, surgeon recruitment, and competitive hospital positioning."
-                ),
-                expert_answers=q3_expert_answers,
-                common_themes=[
-                    "Total cost of ownership and procedure volume modelling",
-                    "Need for financial justification alongside clinical champions",
-                ],
-                contrasting_viewpoints=[
-                    "Germany/France treat financial ROI as the primary gating decision",
-                    "UK balances financial ROI equally with clinical strategy, length of stay, and recruitment",
-                ],
-            )
-        )
-
-        # Question 4: Surgeon training and clinical outcomes
-        q4_expert_answers = [
-            ExpertAnswer(
-                expert_id="expert_fr_martin",
-                expert_name="Dr. Jean Martin",
-                market="France",
-                role="Head of Urology",
-                has_evidence=True,
-                perspective_summary="Training must cover multiple surgeons to secure high utilization; clinical outcomes are a necessary prerequisite but cannot stand alone.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "expert_id": "expert_fr_martin",
-                            "quote": "Training matters, especially in the first year. If only one surgeon can use the system, the economics become difficult. Hospitals want several surgeons trained so utilisation is high enough.",
-                            "relevance": "Multi-surgeon training for utilization in France",
-                        }
-                    ),
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "expert_id": "expert_fr_martin",
-                            "quote": "Clinical outcomes are necessary, but they are not enough on their own. If two systems offer similar outcomes, the hospital will look hard at economics and utilisation.",
-                            "relevance": "Clinical outcomes as baseline requirement",
-                        }
-                    ),
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_de_keller",
-                expert_name="Anna Keller",
-                market="Germany",
-                role="Former Hospital Procurement Director",
-                has_evidence=True,
-                perspective_summary="Operationally critical; single-surgeon dependency severely impairs utilization and weakens the financial business case.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_de_02",
-                            "expert_id": "expert_de_keller",
-                            "quote": "Very important operationally. If the hospital buys a system but only one surgeon is comfortable using it, utilisation will be poor. That weakens the business case.",
-                            "relevance": "Operational risk of single-surgeon training in Germany",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_gb_carter",
-                expert_name="Dr. Emily Carter",
-                market="United Kingdom",
-                role="Consultant Urologist",
-                has_evidence=True,
-                perspective_summary="The entire programme sustainability depends on training enough surgeons and theatre staff to generate requisite procedure volumes.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_uk_03",
-                            "expert_id": "expert_gb_carter",
-                            "quote": "The key point is that adoption is not just about buying the machine. Hospitals need enough trained people and enough procedure volume to make the programme sustainable.",
-                            "relevance": "Programme sustainability and theatre team training",
-                        }
-                    )
-                ],
-            ),
-        ]
-        analyses.append(
-            GuideQuestionAnalysis(
-                question_id=4,
-                question="How important are surgeon training and clinical outcomes?",
-                synthesized_answer=(
-                    "All three experts reach strong consensus: surgeon and theatre staff training is fundamental to operational "
-                    "utilization. If a hospital purchases a system that only one clinician can operate, procedure volume falters and the "
-                    "business case collapses. Clinical outcomes are viewed as an indispensable baseline ('necessary but not enough on their own') "
-                    "that must be accompanied by multi-user training to make the robotics programme economically sustainable."
-                ),
-                expert_answers=q4_expert_answers,
-                common_themes=[
-                    "Multi-surgeon training to mitigate utilization risk",
-                    "Whole-team enablement including theatre staff",
-                    "Clinical outcomes as necessary baseline rather than sole differentiator",
-                ],
-                contrasting_viewpoints=[
-                    "Complete consensus across clinical and procurement stakeholders on training's role in utilization",
-                ],
-            )
-        )
-
-        # Question 5: 3–5 year adoption trend
-        q5_expert_answers = [
-            ExpertAnswer(
-                expert_id="expert_fr_martin",
-                expert_name="Dr. Jean Martin",
-                market="France",
-                role="Head of Urology",
-                has_evidence=True,
-                perspective_summary="Projects steady, non-explosive growth with 15–20% annual procedure increases in stronger centres.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "expert_id": "expert_fr_martin",
-                            "quote": "I expect adoption to continue increasing, probably steadily rather than explosively. I would expect maybe 15 to 20 percent more procedures annually in some of the stronger centres, but smaller hospitals will remain slower.",
-                            "relevance": "Growth projections in France",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_de_keller",
-                expert_name="Anna Keller",
-                market="Germany",
-                role="Former Hospital Procurement Director",
-                has_evidence=True,
-                perspective_summary="More conservative outlook: high single digits or low double digits, constrained by competing hospital capital priorities.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_de_02",
-                            "expert_id": "expert_de_keller",
-                            "quote": "I would expect continued growth, but probably closer to high single digits or low double digits in procedure volumes rather than something like 20 percent across the whole market.",
-                            "relevance": "Conservative procurement forecast in Germany",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_gb_carter",
-                expert_name="Dr. Emily Carter",
-                market="United Kingdom",
-                role="Consultant Urologist",
-                has_evidence=True,
-                perspective_summary="Positive and bullish: potential growth exceeding 15% annually if training capacity expands and pricing becomes more competitive.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_uk_03",
-                            "expert_id": "expert_gb_carter",
-                            "quote": "I am quite positive. I think adoption could accelerate if training expands and systems become more cost competitive. I could see procedure growth above 15 percent annually in some areas.",
-                            "relevance": "Accelerating growth outlook in the UK",
-                        }
-                    )
-                ],
-            ),
-        ]
-        analyses.append(
-            GuideQuestionAnalysis(
-                question_id=5,
-                question="What adoption trend do you expect over the next 3–5 years?",
-                synthesized_answer=(
-                    "Forecasts indicate steady upward adoption across Europe, but with notable variance in growth velocity. "
-                    "Germany's procurement perspective is the most conservative, anticipating high-single to low-double-digit growth due to "
-                    "competing hospital capital priorities. France anticipates steady 15–20% annual procedure expansion concentrated in larger centres. "
-                    "The UK presents an optimistic trajectory, with potential growth exceeding 15% annually conditional upon training expansion "
-                    "and increased competitive pricing."
-                ),
-                expert_answers=q5_expert_answers,
-                common_themes=[
-                    "Positive steady growth rather than sudden market disruption",
-                    "Expansion driven primarily by higher-tier institutions",
-                ],
-                contrasting_viewpoints=[
-                    "Germany anticipates conservative single/low-double-digit growth (<12%)",
-                    "France projects 15–20% annual increases in strong centres",
-                    "UK projects >15% conditioned on training capacity and competitive system pricing",
-                ],
-            )
-        )
-
-        # Question 6: Decision-making timeline
-        q6_expert_answers = [
-            ExpertAnswer(
-                expert_id="expert_fr_martin",
-                expert_name="Dr. Jean Martin",
-                market="France",
-                role="Head of Urology",
-                has_evidence=True,
-                perspective_summary="6 to 12 months once serious; potentially longer if deferred into subsequent budget cycles.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "expert_id": "expert_fr_martin",
-                            "quote": "Six to twelve months is realistic once the hospital becomes serious. It can be longer if the capital committee pushes the purchase into the next budget cycle.",
-                            "relevance": "Purchasing cycle timeline in France",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_de_keller",
-                expert_name="Anna Keller",
-                market="Germany",
-                role="Former Hospital Procurement Director",
-                has_evidence=True,
-                perspective_summary="9 to 18 months, prolonged by the need to align procurement, clinical leadership, finance, and management.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_de_02",
-                            "expert_id": "expert_de_keller",
-                            "quote": "Nine to eighteen months is common. Procurement, clinical leadership, finance and management all need to align, so it can move slowly.",
-                            "relevance": "Procurement timeline in Germany",
-                        }
-                    )
-                ],
-            ),
-            ExpertAnswer(
-                expert_id="expert_gb_carter",
-                expert_name="Dr. Emily Carter",
-                market="United Kingdom",
-                role="Consultant Urologist",
-                has_evidence=True,
-                perspective_summary="6 to 9 months if capital is already allocated; significantly longer if awaiting a new NHS capital funding cycle.",
-                evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_uk_03",
-                            "expert_id": "expert_gb_carter",
-                            "quote": "Around six to nine months can happen if funding is already available. If the trust has to wait for a new capital cycle, it can take much longer.",
-                            "relevance": "Capital cycle timeline in the UK NHS",
-                        }
-                    )
-                ],
-            ),
-        ]
-        analyses.append(
-            GuideQuestionAnalysis(
-                question_id=6,
-                question="What is the typical hospital decision-making timeline for purchasing a new robotic system?",
-                synthesized_answer=(
-                    "Hospital purchasing timelines range from 6 to 18 months across Europe, tightly governed by annual capital budgeting cycles. "
-                    "Germany exhibits the longest procurement timeline (9–18 months) due to strict multi-departmental consensus requirements "
-                    "between procurement, clinical leadership, finance, and hospital executives. In France and the UK, decisions can conclude "
-                    "within 6–12 months and 6–9 months respectively, provided capital funds are already allocated; otherwise, timing extends into "
-                    "subsequent budget rounds."
-                ),
-                expert_answers=q6_expert_answers,
-                common_themes=[
-                    "Dependency on formal annual hospital capital budget cycles",
-                    "Multi-stakeholder approval process involving clinical, finance, and procurement",
-                ],
-                contrasting_viewpoints=[
-                    "Germany requires 9–18 months for multi-department alignment",
-                    "UK and France can complete in 6–9 and 6–12 months if funding is pre-cleared",
-                ],
-            )
-        )
-
-        self._guide_analyses_cache = analyses
+    def get_interview_guide_analyses(self, force_refresh: bool = False) -> List[GuideQuestionAnalysis]:
+        """Analyzes all 6 interview guide questions using live Google Cloud Gemini reasoning."""
+        analyses = []
+        for q_id in range(1, 7):
+            analysis = self.get_guide_question_analysis(q_id, force_refresh=force_refresh)
+            if analysis:
+                analyses.append(analysis)
         return analyses
 
-    def get_guide_question_analysis(self, question_id: int) -> Optional[GuideQuestionAnalysis]:
-        analyses = self.get_interview_guide_analyses()
-        for a in analyses:
-            if a.question_id == question_id:
-                return a
-        return None
+    def get_guide_question_analysis(self, question_id: int, force_refresh: bool = False) -> Optional[GuideQuestionAnalysis]:
+        """Analyzes a single interview guide question dynamically using live Google Cloud Gemini."""
+        if not force_refresh and question_id in self._guide_analyses_cache:
+            return self._guide_analyses_cache[question_id]
 
-    def get_theme_analyses(self) -> List[ThemeItem]:
-        """Identifies common cross-call themes supported by multi-expert evidence."""
-        if self._themes_cache is not None:
+        question_text = GUIDE_QUESTIONS.get(question_id)
+        if not question_text:
+            return None
+
+        if not self.client:
+            raise RuntimeError("Google GenAI client is not configured. Please set GEMINI_API_KEY in .env")
+
+        context = self._get_transcripts_context()
+
+        prompt = f"""You are an evidence-grounded healthcare research analyst for the Hasamex European Robotic Surgery study.
+Transcripts from 3 expert interviews (France, Germany, United Kingdom) are provided below.
+
+Task: Answer Interview Guide Question {question_id}:
+"{question_text}"
+
+Instructions:
+1. Synthesize the findings across all 3 markets (France, Germany, UK) into a clear synthesized_answer.
+2. For each expert (Dr. Jean Martin in France, Anna Keller in Germany, Dr. Emily Carter in UK):
+   - summarize their perspective
+   - extract their exact verbatim quote spoken in the transcript
+3. Identify common consensus themes and contrasting viewpoints.
+4. Output valid JSON matching this schema:
+{{
+  "synthesized_answer": "Overall market synthesis across France, Germany, and UK...",
+  "expert_answers": [
+    {{
+      "expert_id": "expert_fr_martin",
+      "expert_name": "Dr. Jean Martin",
+      "market": "France",
+      "role": "Head of Urology",
+      "perspective_summary": "Summary of French perspective...",
+      "quote": "Exact verbatim quote from Dr. Martin..."
+    }},
+    {{
+      "expert_id": "expert_de_keller",
+      "expert_name": "Anna Keller",
+      "market": "Germany",
+      "role": "Former Hospital Procurement Director",
+      "perspective_summary": "Summary of German perspective...",
+      "quote": "Exact verbatim quote from Anna Keller..."
+    }},
+    {{
+      "expert_id": "expert_gb_carter",
+      "expert_name": "Dr. Emily Carter",
+      "market": "United Kingdom",
+      "role": "Consultant Urologist",
+      "perspective_summary": "Summary of UK perspective...",
+      "quote": "Exact verbatim quote from Dr. Carter..."
+    }}
+  ],
+  "common_themes": ["Theme 1", "Theme 2"],
+  "contrasting_viewpoints": ["Contrasting point 1"]
+}}
+
+Transcripts:
+{context}
+"""
+
+        response = self.client.models.generate_content(
+            model=settings.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+
+        raw_json = json.loads(response.text)
+        synthesized_answer = raw_json.get("synthesized_answer", "")
+        common_themes = raw_json.get("common_themes", [])
+        contrasting_viewpoints = raw_json.get("contrasting_viewpoints", [])
+
+        validated_expert_answers: List[ExpertAnswer] = []
+        for ea in raw_json.get("expert_answers", []):
+            quote_raw = ea.get("quote", "")
+            exp_id = ea.get("expert_id")
+            # Strictly validate quote against canonical transcripts in DB
+            enriched = self.validator.enrich_evidence_item({
+                "quote": quote_raw,
+                "expert_id": exp_id,
+                "relevance": f"Statement by {ea.get('expert_name')} on {question_text}",
+            })
+
+            evidence_list = [enriched] if enriched else []
+            if not evidence_list:
+                # If slight variation, find matching segment in DB and use exact text
+                val_res = self.validator.validate_quote(quote_raw, expert_id=exp_id)
+                if val_res.matched_segment:
+                    seg = val_res.matched_segment
+                    evidence_list = [
+                        EvidenceItem(
+                            segment_id=seg.segment_id,
+                            call_id=seg.call_id,
+                            expert_id=seg.expert_id,
+                            expert_name=ea.get("expert_name", seg.speaker),
+                            speaker=seg.speaker,
+                            market=ea.get("market", "Europe"),
+                            quote=seg.text,
+                            start_timestamp=seg.start_timestamp,
+                            end_timestamp=seg.end_timestamp,
+                            start_time_seconds=seg.start_time_seconds,
+                            end_time_seconds=seg.end_time_seconds,
+                            relevance=f"Canonical segment for {question_text}",
+                            verified=True,
+                            validation_notes="Verified against canonical segment",
+                        )
+                    ]
+
+            validated_expert_answers.append(
+                ExpertAnswer(
+                    expert_id=ea.get("expert_id", "unknown"),
+                    expert_name=ea.get("expert_name", "Expert"),
+                    market=ea.get("market", "Europe"),
+                    role=ea.get("role", "Healthcare Professional"),
+                    has_evidence=len(evidence_list) > 0,
+                    perspective_summary=ea.get("perspective_summary", ""),
+                    evidence=evidence_list,
+                )
+            )
+
+        analysis = GuideQuestionAnalysis(
+            question_id=question_id,
+            question=question_text,
+            synthesized_answer=synthesized_answer,
+            expert_answers=validated_expert_answers,
+            common_themes=common_themes,
+            contrasting_viewpoints=contrasting_viewpoints,
+        )
+
+        self._guide_analyses_cache[question_id] = analysis
+        return analysis
+
+    def get_theme_analyses(self, force_refresh: bool = False) -> List[ThemeItem]:
+        """Identifies common themes across all 3 transcripts using live Google Cloud Gemini reasoning."""
+        if not force_refresh and self._themes_cache is not None:
             return self._themes_cache
 
-        themes = [
-            ThemeItem(
-                theme_id="theme_01_capital_tco_barrier",
-                title="Capital Expenditure & Total Cost of Ownership Barrier",
-                summary=(
-                    "High initial capital costs and complex Total Cost of Ownership (service contracts, maintenance, "
-                    "and procedure volume requirements) represent the universal gating factor across European hospitals. "
-                    "Finance and procurement committees require rigorous proof of economic viability before approving acquisitions."
-                ),
-                markets=["France", "Germany", "United Kingdom"],
-                experts=["Dr. Jean Martin", "Anna Keller", "Dr. Emily Carter"],
-                supporting_evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "quote": "The biggest issue is still capital budget approval. Hospitals may like the technology clinically, but purchasing committees need a strong economic case before approving a system.",
-                            "relevance": "France: Capital budget approval requirement",
-                        }
-                    ),
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_de_02",
-                            "quote": "Cost is the first barrier. These are large capital purchases, and hospital finances are under pressure. The second issue is proving that the system will be used enough.",
-                            "relevance": "Germany: Capital cost under financial pressure",
-                        }
-                    ),
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_uk_03",
-                            "quote": "Around six to nine months can happen if funding is already available. If the trust has to wait for a new capital cycle, it can take much longer.",
-                            "relevance": "UK: Capital cycle funding availability",
-                        }
-                    ),
-                ],
-            ),
-            ThemeItem(
-                theme_id="theme_02_surgeon_training_utilization",
-                title="Surgeon Training as the Linchpin of Utilization & ROI",
-                summary=(
-                    "Experts agree that purchasing robotics without multi-surgeon and theatre team training creates a critical "
-                    "single-point-of-failure. If only one clinician can use the system, utilization collapses, severely undermining "
-                    "the hospital's investment case and operational sustainability."
-                ),
-                markets=["France", "Germany", "United Kingdom"],
-                experts=["Dr. Jean Martin", "Anna Keller", "Dr. Emily Carter"],
-                supporting_evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "quote": "Training matters, especially in the first year. If only one surgeon can use the system, the economics become difficult. Hospitals want several surgeons trained so utilisation is high enough.",
-                            "relevance": "France: Multi-surgeon training for utilization",
-                        }
-                    ),
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_de_02",
-                            "quote": "Very important operationally. If the hospital buys a system but only one surgeon is comfortable using it, utilisation will be poor. That weakens the business case.",
-                            "relevance": "Germany: Single-surgeon dependency operational risk",
-                        }
-                    ),
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_uk_03",
-                            "quote": "You can buy a system, but if you cannot train enough surgeons and theatre staff, adoption stalls.",
-                            "relevance": "UK: Workforce training capacity as core adoption pillar",
-                        }
-                    ),
-                ],
-            ),
-            ThemeItem(
-                theme_id="theme_03_two_tier_market_stratification",
-                title="Two-Tier Market Stratification (Academic vs. Regional Hospitals)",
-                summary=(
-                    "Robotic surgery adoption is sharply divided across institution sizes. Academic university hospitals and major "
-                    "central trusts have achieved routine adoption, whereas smaller regional and community hospitals face severe "
-                    "economic and volume barriers that keep them sidelined."
-                ),
-                markets=["France", "Germany", "United Kingdom"],
-                experts=["Dr. Jean Martin", "Anna Keller", "Dr. Emily Carter"],
-                supporting_evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "quote": "Adoption is growing, but it is still concentrated in larger academic hospitals and private centres with stronger capital budgets. Smaller regional hospitals are much slower.",
-                            "relevance": "France: Academic vs regional concentration",
-                        }
-                    ),
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_de_02",
-                            "quote": "Large university hospitals are much more advanced, while many smaller hospitals are still waiting.",
-                            "relevance": "Germany: University hospitals vs smaller facilities",
-                        }
-                    ),
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_uk_03",
-                            "quote": "in some larger NHS trusts robotic surgery is becoming standard for selected procedures. But access still varies significantly by hospital.",
-                            "relevance": "UK: Large NHS trusts vs general hospital access",
-                        }
-                    ),
-                ],
-            ),
-            ThemeItem(
-                theme_id="theme_04_clinical_outcomes_necessary_not_sufficient",
-                title="Clinical Outcomes: Necessary Baseline but Insufficient Alone",
-                summary=(
-                    "Demonstrating favorable patient outcomes and surgeon enthusiasm is an absolute prerequisite to initiate a purchase "
-                    "discussion, but clinical arguments alone never close a sale without a defensible economic and utilization model."
-                ),
-                markets=["France", "Germany"],
-                experts=["Dr. Jean Martin", "Anna Keller"],
-                supporting_evidence=[
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_fr_01",
-                            "quote": "Clinical outcomes are necessary, but they are not enough on their own. If two systems offer similar outcomes, the hospital will look hard at economics and utilisation.",
-                            "relevance": "France: Outcomes necessary but not enough",
-                        }
-                    ),
-                    self.validator.enrich_evidence_item(
-                        {
-                            "call_id": "call_de_02",
-                            "quote": "A strong clinical case helps, but the economic case decides whether it gets approved.",
-                            "relevance": "Germany: Economic case decides approval",
-                        }
-                    ),
-                ],
-            ),
-        ]
+        if not self.client:
+            raise RuntimeError("Google GenAI client is not configured. Please set GEMINI_API_KEY in .env")
+
+        context = self._get_transcripts_context()
+
+        prompt = f"""You are an evidence-grounded research analyst.
+Examine the 3 European robotic surgery transcripts (France, Germany, UK) below.
+Identify the 4 major common themes across the interviews where multiple experts share common dynamics.
+
+For each theme:
+1. Provide a title and detailed summary.
+2. List the markets and experts mentioning this theme.
+3. For each expert, provide their exact verbatim quote from the transcript.
+
+Return ONLY valid JSON adhering strictly to this schema:
+{{
+  "themes": [
+    {{
+      "theme_id": "theme_01",
+      "title": "Theme Title",
+      "summary": "Detailed summary...",
+      "markets": ["France", "Germany", "United Kingdom"],
+      "experts": ["Dr. Jean Martin", "Anna Keller", "Dr. Emily Carter"],
+      "supporting_evidence": [
+        {{
+          "call_id": "call_fr_01",
+          "expert_id": "expert_fr_martin",
+          "expert_name": "Dr. Jean Martin",
+          "quote": "Exact verbatim quote from Dr. Martin..."
+        }},
+        {{
+          "call_id": "call_de_02",
+          "expert_id": "expert_de_keller",
+          "expert_name": "Anna Keller",
+          "quote": "Exact verbatim quote from Anna Keller..."
+        }},
+        {{
+          "call_id": "call_uk_03",
+          "expert_id": "expert_gb_carter",
+          "expert_name": "Dr. Emily Carter",
+          "quote": "Exact verbatim quote from Dr. Carter..."
+        }}
+      ]
+    }}
+  ]
+}}
+
+Transcripts:
+{context}
+"""
+
+        response = self.client.models.generate_content(
+            model=settings.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+
+        raw_json = json.loads(response.text)
+        themes: List[ThemeItem] = []
+
+        for raw_t in raw_json.get("themes", []):
+            validated_evidence = []
+            for ev in raw_t.get("supporting_evidence", []):
+                enriched = self.validator.enrich_evidence_item({
+                    "quote": ev.get("quote", ""),
+                    "call_id": ev.get("call_id"),
+                    "expert_id": ev.get("expert_id"),
+                    "relevance": f"Supporting quote for {raw_t.get('title')}",
+                })
+                if enriched:
+                    validated_evidence.append(enriched)
+
+            themes.append(
+                ThemeItem(
+                    theme_id=raw_t.get("theme_id", "theme_gen"),
+                    title=raw_t.get("title", ""),
+                    summary=raw_t.get("summary", ""),
+                    markets=raw_t.get("markets", ["France", "Germany", "United Kingdom"]),
+                    experts=raw_t.get("experts", []),
+                    supporting_evidence=validated_evidence,
+                )
+            )
 
         self._themes_cache = themes
         return themes
 
-    def get_disagreement_analyses(self) -> List[DisagreementItem]:
-        """Identifies contrasting viewpoints and nuances across calls with exact evidence."""
-        if self._disagreements_cache is not None:
+    def get_disagreement_analyses(self, force_refresh: bool = False) -> List[DisagreementItem]:
+        """Identifies contrasting viewpoints across interviews using live Google Cloud Gemini reasoning."""
+        if not force_refresh and self._disagreements_cache is not None:
             return self._disagreements_cache
 
-        disagreements = [
-            DisagreementItem(
-                topic_id="disagree_01_purchasing_gatekeeper",
-                topic="Purchasing Decision Gatekeeper: Pure Financial ROI vs. Strategic Clinical Balance",
-                category=DisagreementCategory.DIFFERENT_EMPHASIS,
-                explanation=(
-                    "German procurement (Keller) and French clinical leadership (Martin) maintain that the economic case and financial "
-                    "ROI are the ultimate deciders for approval. In contrast, the UK perspective (Carter) emphasizes that hospital purchasing "
-                    "decisions are not purely financial, balancing economics against clinical strategy, patient length of stay, and staff recruitment."
-                ),
-                stances=[
-                    ExpertStance(
-                        expert_id="expert_de_keller",
-                        expert_name="Anna Keller",
-                        market="Germany",
-                        position="The economic case decides whether a system gets approved over the clinical case.",
-                        evidence=self.validator.enrich_evidence_item(
-                            {
-                                "call_id": "call_de_02",
-                                "quote": "A strong clinical case helps, but the economic case decides whether it gets approved.",
-                                "relevance": "Decisive procurement economics in Germany",
-                            }
-                        ),
-                    ),
-                    ExpertStance(
-                        expert_id="expert_gb_carter",
-                        expert_name="Dr. Emily Carter",
-                        market="United Kingdom",
-                        position="Discussions are not purely financial; economics and clinical strategy are balanced with recruitment and patient outcomes.",
-                        evidence=self.validator.enrich_evidence_item(
-                            {
-                                "call_id": "call_uk_03",
-                                "quote": "I would say economics and clinical strategy are balanced. I would not say finance alone decides the purchase.",
-                                "relevance": "Balanced clinical vs financial evaluation in the UK",
-                            }
-                        ),
-                    ),
-                ],
-            ),
-            DisagreementItem(
-                topic_id="disagree_02_3_5_year_growth_rates",
-                topic="3–5 Year Procedure Growth Outlook: Conservative Single Digits vs. >15% Accelerating Expansion",
-                category=DisagreementCategory.DIFFERENT_EMPHASIS,
-                explanation=(
-                    "Anna Keller (Germany) projects modest growth of high single digits to low double digits, explicitly warning against expecting "
-                    "20% market growth due to competing capital priorities. Conversely, Dr. Jean Martin (France) and Dr. Emily Carter (UK) project "
-                    "higher growth rates of 15–20% annually in strong centres and potential acceleration if training capacity expands."
-                ),
-                stances=[
-                    ExpertStance(
-                        expert_id="expert_de_keller",
-                        expert_name="Anna Keller",
-                        market="Germany",
-                        position="Expects conservative growth closer to high single digits or low double digits rather than 20%.",
-                        evidence=self.validator.enrich_evidence_item(
-                            {
-                                "call_id": "call_de_02",
-                                "quote": "I would expect continued growth, but probably closer to high single digits or low double digits in procedure volumes rather than something like 20 percent across the whole market.",
-                                "relevance": "Conservative German volume projection",
-                            }
-                        ),
-                    ),
-                    ExpertStance(
-                        expert_id="expert_fr_martin",
-                        expert_name="Dr. Jean Martin",
-                        market="France",
-                        position="Projects 15 to 20 percent more procedures annually in stronger centres.",
-                        evidence=self.validator.enrich_evidence_item(
-                            {
-                                "call_id": "call_fr_01",
-                                "quote": "I would expect maybe 15 to 20 percent more procedures annually in some of the stronger centres, but smaller hospitals will remain slower.",
-                                "relevance": "15-20% projection in France",
-                            }
-                        ),
-                    ),
-                    ExpertStance(
-                        expert_id="expert_gb_carter",
-                        expert_name="Dr. Emily Carter",
-                        market="United Kingdom",
-                        position="Quite positive; anticipates procedure growth above 15 percent annually if training expands.",
-                        evidence=self.validator.enrich_evidence_item(
-                            {
-                                "call_id": "call_uk_03",
-                                "quote": "I think adoption could accelerate if training expands and systems become more cost competitive. I could see procedure growth above 15 percent annually in some areas.",
-                                "relevance": "Positive >15% projection in the UK",
-                            }
-                        ),
-                    ),
-                ],
-            ),
-            DisagreementItem(
-                topic_id="disagree_03_primary_adoption_barrier",
-                topic="Primary Adoption Bottleneck: Capital Budget Approval vs. Workforce Training Bandwidth",
-                category=DisagreementCategory.DIFFERENT_EMPHASIS,
-                explanation=(
-                    "While Dr. Martin and Anna Keller highlight capital cost and financial committee sign-off as the number-one hurdle, "
-                    "Dr. Carter elevates surgeon and theatre staff training capacity to equal standing with funding, asserting that adoption "
-                    "stalls without human capital readiness regardless of machine purchase."
-                ),
-                stances=[
-                    ExpertStance(
-                        expert_id="expert_fr_martin",
-                        expert_name="Dr. Jean Martin",
-                        market="France",
-                        position="The biggest issue is capital budget approval and financial justification.",
-                        evidence=self.validator.enrich_evidence_item(
-                            {
-                                "call_id": "call_fr_01",
-                                "quote": "The biggest issue is still capital budget approval. Hospitals may like the technology clinically, but purchasing committees need a strong economic case before approving a system.",
-                                "relevance": "Capital budget priority",
-                            }
-                        ),
-                    ),
-                    ExpertStance(
-                        expert_id="expert_gb_carter",
-                        expert_name="Dr. Emily Carter",
-                        market="United Kingdom",
-                        position="Training capacity is just as important as funding; buying a system without trained staff causes adoption to stall.",
-                        evidence=self.validator.enrich_evidence_item(
-                            {
-                                "call_id": "call_uk_03",
-                                "quote": "Funding is important, but I would say training capacity is just as important. You can buy a system, but if you cannot train enough surgeons and theatre staff, adoption stalls.",
-                                "relevance": "Human capital bottleneck in the UK",
-                            }
-                        ),
-                    ),
-                ],
-            ),
-            DisagreementItem(
-                topic_id="disagree_04_procurement_timeline",
-                topic="Hospital Procurement Cycle Length: 6–9 Months vs. 9–18 Months",
-                category=DisagreementCategory.DIFFERENT_EMPHASIS,
-                explanation=(
-                    "German procurement requires 9 to 18 months to build consensus across procurement, clinical, finance, and hospital management. "
-                    "In contrast, UK NHS trusts and French centres can reach decisions in 6 to 9 or 6 to 12 months when funding is already available."
-                ),
-                stances=[
-                    ExpertStance(
-                        expert_id="expert_de_keller",
-                        expert_name="Anna Keller",
-                        market="Germany",
-                        position="Commonly requires 9 to 18 months due to multi-departmental consensus requirements.",
-                        evidence=self.validator.enrich_evidence_item(
-                            {
-                                "call_id": "call_de_02",
-                                "quote": "Nine to eighteen months is common. Procurement, clinical leadership, finance and management all need to align, so it can move slowly.",
-                                "relevance": "9-18 month timeline in Germany",
-                            }
-                        ),
-                    ),
-                    ExpertStance(
-                        expert_id="expert_gb_carter",
-                        expert_name="Dr. Emily Carter",
-                        market="United Kingdom",
-                        position="Can take 6 to 9 months if capital is pre-allocated.",
-                        evidence=self.validator.enrich_evidence_item(
-                            {
-                                "call_id": "call_uk_03",
-                                "quote": "Around six to nine months can happen if funding is already available. If the trust has to wait for a new capital cycle, it can take much longer.",
-                                "relevance": "6-9 month timeline in the UK",
-                            }
-                        ),
-                    ),
-                ],
-            ),
-        ]
+        if not self.client:
+            raise RuntimeError("Google GenAI client is not configured. Please set GEMINI_API_KEY in .env")
+
+        context = self._get_transcripts_context()
+
+        prompt = f"""You are an evidence-grounded research analyst.
+Examine the 3 European robotic surgery transcripts (France, Germany, UK) below.
+Identify the 4 key contrasting viewpoints, disagreements, or differing emphases among the experts.
+
+Classify each disagreement into one of these exact categories:
+- "Agreement"
+- "Partial agreement"
+- "Different emphasis"
+- "Contradiction"
+- "Unique viewpoint"
+
+For each disagreement:
+1. topic and category
+2. analytical explanation of the difference
+3. the diverging stances with expert name, market, their position, and their exact verbatim quote.
+
+Return ONLY valid JSON adhering strictly to this schema:
+{{
+  "disagreements": [
+    {{
+      "topic_id": "disagree_01",
+      "topic": "Topic Name",
+      "category": "Different emphasis",
+      "explanation": "Analytical explanation...",
+      "stances": [
+        {{
+          "expert_id": "expert_de_keller",
+          "expert_name": "Anna Keller",
+          "market": "Germany",
+          "position": "Summary of position...",
+          "quote": "Exact verbatim quote...",
+          "call_id": "call_de_02"
+        }},
+        {{
+          "expert_id": "expert_gb_carter",
+          "expert_name": "Dr. Emily Carter",
+          "market": "United Kingdom",
+          "position": "Summary of position...",
+          "quote": "Exact verbatim quote...",
+          "call_id": "call_uk_03"
+        }}
+      ]
+    }}
+  ]
+}}
+
+Transcripts:
+{context}
+"""
+
+        response = self.client.models.generate_content(
+            model=settings.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+
+        raw_json = json.loads(response.text)
+        disagreements: List[DisagreementItem] = []
+
+        for raw_d in raw_json.get("disagreements", []):
+            stances: List[ExpertStance] = []
+            for st in raw_d.get("stances", []):
+                enriched = self.validator.enrich_evidence_item({
+                    "quote": st.get("quote", ""),
+                    "call_id": st.get("call_id"),
+                    "expert_id": st.get("expert_id"),
+                    "relevance": f"Stance on {raw_d.get('topic')}",
+                })
+                if enriched:
+                    stances.append(
+                        ExpertStance(
+                            expert_id=st.get("expert_id", "unknown"),
+                            expert_name=st.get("expert_name", "Expert"),
+                            market=st.get("market", "Europe"),
+                            position=st.get("position", ""),
+                            evidence=enriched,
+                        )
+                    )
+
+            cat_str = raw_d.get("category", "Different emphasis")
+            valid_cat = DisagreementCategory.DIFFERENT_EMPHASIS
+            for c in DisagreementCategory:
+                if c.value.lower() in cat_str.lower():
+                    valid_cat = c
+                    break
+
+            disagreements.append(
+                DisagreementItem(
+                    topic_id=raw_d.get("topic_id", "disagree_gen"),
+                    topic=raw_d.get("topic", ""),
+                    category=valid_cat,
+                    explanation=raw_d.get("explanation", ""),
+                    stances=stances,
+                )
+            )
 
         self._disagreements_cache = disagreements
         return disagreements
 
     def ask_question(self, query: str, market_filter: Optional[str] = None) -> QueryAnswer:
-        """Processes arbitrary user questions across all transcripts with grounded validation."""
-        q_clean = query.strip().lower()
+        """Answers an arbitrary user question using live Google Cloud Gemini reasoning grounded in transcripts."""
+        if not self.client:
+            raise RuntimeError("Google GenAI client is not configured. Please set GEMINI_API_KEY in .env")
 
-        # Check for out-of-scope / insufficient evidence questions
-        out_of_scope_keywords = ["japan", "united states", "usa", "china", "cardiac", "orthopedic", "pediatric", "ai pricing", "stocks"]
-        if any(kw in q_clean for kw in out_of_scope_keywords):
+        # Retrieve relevant context segments using Google File Search or Canonical DB
+        retrieved_segments = self.file_search.search_file_search_store(query, market=market_filter)
+        context_lines = []
+        for s in retrieved_segments:
+            context_lines.append(f"[{s['start_timestamp']}] (Call: {s['call_id']}, Expert: {s['speaker']}): {s['text']}")
+
+        retrieval_context = "\n".join(context_lines)
+        full_context = self._get_transcripts_context(market_filter=market_filter)
+
+        prompt = f"""You are an evidence-grounded expert interview analyst.
+Answer the user's research question based SOLELY on the European robotic surgery interview transcripts (France, Germany, UK) provided below.
+
+User Question: "{query}"
+
+Retrieved Relevant Segments:
+{retrieval_context}
+
+Full Authoritative Transcripts:
+{full_context}
+
+Instructions:
+1. Provide a direct, factual synthesis that directly answers the user's question.
+2. If the transcripts do not contain sufficient evidence to answer the question (e.g. topic is outside France/Germany/UK robotic surgery, or discusses other countries/specialties not mentioned in the transcripts), set "has_sufficient_evidence" to false and explain that clearly in "answer".
+3. When evidence exists, extract exact verbatim quotes spoken by the experts and provide the call_id and speaker.
+4. Output valid JSON adhering strictly to this schema:
+{{
+  "answer": "Direct factual answer synthesized from transcripts...",
+  "has_sufficient_evidence": true,
+  "supporting_quotes": [
+    {{
+      "call_id": "call_fr_01",
+      "speaker": "Dr. Martin",
+      "quote": "Exact verbatim quote from the transcript...",
+      "relevance": "Why this quote supports the answer"
+    }}
+  ],
+  "themes_detected": ["Theme 1"],
+  "markets_covered": ["France", "Germany"]
+}}
+"""
+
+        response = self.client.models.generate_content(
+            model=settings.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+
+        raw_json = json.loads(response.text)
+        has_evidence = raw_json.get("has_sufficient_evidence", True)
+        answer_text = raw_json.get("answer", "")
+
+        if not has_evidence:
             return QueryAnswer(
                 query=query,
-                answer="There is insufficient evidence in the provided European robotic surgery interview transcripts to answer this question. The transcripts exclusively cover urology and procurement in France, Germany, and the UK.",
+                answer=answer_text,
                 has_sufficient_evidence=False,
                 evidence=[],
                 themes_detected=[],
                 markets_covered=[],
             )
 
-        # Keyword-based semantic matching across canonical segments
-        words = [w for w in q_clean.replace("?", "").replace(".", "").split() if len(w) > 3]
-        matched_segments = self.repo.search_segments(words, market=market_filter, only_expert=True)
+        validated_evidence: List[EvidenceItem] = []
+        for sq in raw_json.get("supporting_quotes", []):
+            enriched = self.validator.enrich_evidence_item({
+                "quote": sq.get("quote", ""),
+                "call_id": sq.get("call_id"),
+                "speaker": sq.get("speaker"),
+                "relevance": sq.get("relevance"),
+            })
+            if enriched:
+                validated_evidence.append(enriched)
 
-        if not matched_segments:
-            return QueryAnswer(
-                query=query,
-                answer="There is insufficient evidence in the provided interviews to answer this question confidently.",
-                has_sufficient_evidence=False,
-                evidence=[],
-                themes_detected=[],
-                markets_covered=[],
-            )
-
-        # Take top 3 most relevant segments and enrich them as verified evidence
-        evidence_items: List[EvidenceItem] = []
-        for seg in matched_segments[:3]:
-            item = self.validator.enrich_evidence_item(
-                {
-                    "segment_id": seg.segment_id,
-                    "call_id": seg.call_id,
-                    "expert_id": seg.expert_id,
-                    "speaker": seg.speaker,
-                    "quote": seg.text,
-                    "relevance": f"Statement by {seg.speaker} regarding {', '.join(words[:3])}",
-                }
-            )
-            if item:
-                evidence_items.append(item)
-
-        # Extract markets and experts covered
-        markets = list({item.market for item in evidence_items})
-        experts = list({item.expert_name for item in evidence_items})
-
-        # Synthesize answers grounded in the retrieved quotes
-        if any(w in q_clean for w in ["barrier", "challenge", "holding", "obstacle"]):
-            answer = (
-                "The experts identify two primary categories of barriers across Europe: high capital costs requiring rigorous "
-                "economic justification to purchasing committees (emphasized by Dr. Martin in France and Anna Keller in Germany), "
-                "and surgeon and theatre staff training bandwidth (emphasized by Dr. Carter in the UK as equal in importance to funding)."
-            )
-        elif any(w in q_clean for w in ["roi", "cost", "budget", "finance", "economic"]):
-            answer = (
-                "Hospital budgets and ROI play a pivotal role, especially in France and Germany where the economic case and Total Cost of Ownership "
-                "decide purchase approval. In contrast, in the UK NHS, economic considerations are balanced against clinical strategy, "
-                "patient length of stay, and staff recruitment."
-            )
-        elif any(w in q_clean for w in ["training", "outcome", "surgeon"]):
-            answer = (
-                "Surgeon and theatre staff training is viewed by all experts as essential to avoid single-surgeon under-utilization, "
-                "which weakens the hospital's financial case. Clinical outcomes are a required baseline ('necessary but not enough on their own') "
-                "that must be supported by adequate procedure volume."
-            )
-        elif any(w in q_clean for w in ["timeline", "cycle", "month", "how long", "purchase process"]):
-            answer = (
-                "Purchasing timelines range from 6 to 18 months depending on governance and funding cycles. Germany exhibits the longest timeline "
-                "(9–18 months) due to multi-department alignment, while France (6–12 months) and the UK (6–9 months) can move faster if capital "
-                "is pre-allocated in the current budget cycle."
-            )
-        elif any(w in q_clean for w in ["trend", "growth", "year", "forecast", "future"]):
-            answer = (
-                "Adoption is projected to grow steadily over the next 3–5 years rather than explosively. Growth expectations vary regionally: "
-                "Germany projects modest high-single to low-double-digit growth due to competing capital priorities, France expects 15–20% "
-                "in stronger centres, and the UK could see growth exceeding 15% if training expands and systems become more cost-competitive."
-            )
-        elif any(w in q_clean for w in ["disagree", "contrast", "difference"]):
-            answer = (
-                "Key contrasts across the interviews centre on the decisiveness of financial ROI (decisive in Germany/France vs. balanced in the UK), "
-                "adoption growth forecasts (conservative in Germany vs. 15–20% in France/UK), and whether the primary bottleneck is capital budget approval "
-                "or staff training capacity."
-            )
-        else:
-            # General grounded synthesis
-            quote_summaries = [f"{item.expert_name} ({item.market}) noted: \"{item.quote[:90]}...\"" for item in evidence_items]
-            answer = (
-                f"Based on evidence from {', '.join(experts)} across {', '.join(markets)}: "
-                f"{' '.join(quote_summaries)}"
-            )
+        markets = list({e.market for e in validated_evidence})
 
         return QueryAnswer(
             query=query,
-            answer=answer,
+            answer=answer_text,
             has_sufficient_evidence=True,
-            evidence=evidence_items,
-            themes_detected=["Grounded cross-interview retrieval"],
-            markets_covered=markets,
+            evidence=validated_evidence,
+            themes_detected=raw_json.get("themes_detected", ["Live Grounded Retrieval"]),
+            markets_covered=markets if markets else ["Europe"],
         )
 
 
-# Singleton
 _analyzer_instance: Optional[GroundedAnalyzer] = None
 
 

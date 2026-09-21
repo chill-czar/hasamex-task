@@ -37,6 +37,10 @@ class CanonicalRepository:
             self.validator = EvidenceValidator(self.calls, self.experts)
             self._sync_to_sqlite()
 
+    def reload(self):
+        """Public method to reload canonical transcripts and re-sync metadata."""
+        self._initialize()
+
     def _sync_to_sqlite(self):
         """Persist metadata to SQLite database for audit and local queries."""
         conn = sqlite3.connect(self.db_path)
