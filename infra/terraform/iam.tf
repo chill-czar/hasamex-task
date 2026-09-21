@@ -34,3 +34,24 @@ resource "google_project_iam_member" "metric_writer" {
   role    = "roles/monitoring.metricWriter"
   member  = "serviceAccount:${google_service_account.vm_sa.email}"
 }
+
+# Storage Admin: allows Terraform and bootstrap script to manage remote state bucket
+resource "google_project_iam_member" "storage_admin" {
+  project = var.project_id
+  role    = "roles/storage.admin"
+  member  = "serviceAccount:${google_service_account.vm_sa.email}"
+}
+
+# Compute Admin: allows CI/CD to manage VM and execute sync
+resource "google_project_iam_member" "compute_admin" {
+  project = var.project_id
+  role    = "roles/compute.admin"
+  member  = "serviceAccount:${google_service_account.vm_sa.email}"
+}
+
+# Service Account User
+resource "google_project_iam_member" "sa_user" {
+  project = var.project_id
+  role    = "roles/iam.serviceAccountUser"
+  member  = "serviceAccount:${google_service_account.vm_sa.email}"
+}
