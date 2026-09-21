@@ -38,6 +38,8 @@ test:
 	@echo ">> Running backend test suite..."
 	$(PYTEST) apps/api/tests/ -v
 
+test-api: test
+
 eval:
 	@echo ">> Running quantitative evaluation against ground truth benchmarks..."
 	$(PYTHON) evaluation/evaluate.py
@@ -45,6 +47,8 @@ eval:
 benchmark-latency:
 	@echo ">> Running end-to-end latency benchmarks across API and architecture..."
 	$(PYTHON) evaluation/benchmark_latency.py
+
+benchmark: benchmark-latency
 
 
 run-backend:
