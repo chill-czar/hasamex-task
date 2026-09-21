@@ -568,7 +568,27 @@ Instructions:
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
 
-        raw_json = json.loads(response.text)
+        try:
+            raw_text = (response.text or "").strip()
+            if raw_text.startswith("```json"):
+                raw_text = raw_text[7:]
+            if raw_text.startswith("```"):
+                raw_text = raw_text[3:]
+            if raw_text.endswith("```"):
+                raw_text = raw_text[:-3]
+            raw_json = json.loads(raw_text.strip())
+        except Exception as e:
+            logger.warning(f"Error parsing json from Gemini response: {e}")
+            import re
+            m = re.search(r"\{.*\}", response.text or "", re.DOTALL)
+            if m:
+                try:
+                    raw_json = json.loads(m.group(0))
+                except Exception:
+                    raw_json = {"has_sufficient_evidence": True, "answer": response.text or "", "evidence": []}
+            else:
+                raw_json = {"has_sufficient_evidence": True, "answer": response.text or "", "evidence": []}
+
         has_evidence = raw_json.get("has_sufficient_evidence", True)
         answer_text = raw_json.get("answer", "")
 
