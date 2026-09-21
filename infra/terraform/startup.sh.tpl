@@ -28,12 +28,13 @@ apt-get install -y --no-install-recommends \
   libpq5 \
   libpq-dev
 
-# 2. Node.js 22 LTS
+# 2. Node.js 22 LTS & PM2
 if ! command -v node &> /dev/null; then
   echo ">> Installing Node.js 22..."
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y nodejs
 fi
+npm install -g pm2
 
 echo ">> Node version: $(node -v)"
 echo ">> Python version: $(python3 --version)"
@@ -92,52 +93,19 @@ if [ -f "$APP_DIR/pyproject.toml" ]; then
 fi
 
 # 9. Set permissions for www-data
-chown -R www-data:www-data "$APP_DIR"
+export PM2_HOME="/opt/hasamex/.pm2"
+mkdir -p "$PM2_HOME"
+chown -R www-data:www-data "$APP_DIR" "$PM2_HOME"
 
-# 10. Systemd Services (Backend API & Frontend Web)
-echo ">> Configuring systemd services: hasamex-api and hasamex-web..."
-cat <<EOF > /etc/systemd/system/hasamex-api.service
-[Unit]
-Description=Hasamex FastAPI Backend Service
-After=network.target
+# 10. Process Supervision with PM2 (Backend API & Frontend Web)
+echo ">> Starting application processes with PM2..."
+cd "$APP_DIR"
+sudo -u www-data PM2_HOME="$PM2_HOME" pm2 delete all 2>/dev/null || true
+sudo -u www-data PM2_HOME="$PM2_HOME" pm2 start ecosystem.config.js
+sudo -u www-data PM2_HOME="$PM2_HOME" pm2 save
 
-[Service]
-Type=simple
-User=www-data
-Group=www-data
-WorkingDirectory=$APP_DIR
-EnvironmentFile=$APP_DIR/.env
-ExecStart=$APP_DIR/.venv/bin/uvicorn apps.api.app.main:app --host 127.0.0.1 --port 8000
-Restart=always
-RestartSec=3
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-cat <<EOF > /etc/systemd/system/hasamex-web.service
-[Unit]
-Description=Hasamex Next.js Frontend Server
-After=network.target hasamex-api.service
-
-[Service]
-Type=simple
-User=www-data
-Group=www-data
-WorkingDirectory=$APP_DIR/apps/web
-Environment=NODE_ENV=production
-Environment=PORT=3000
-ExecStart=/usr/bin/npm run start -- -p 3000 -H 127.0.0.1
-Restart=always
-RestartSec=3
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
+# Setup PM2 systemd startup hook for automatic reboot recovery
+env PATH=$PATH:/usr/bin pm2 startup systemd -u www-data --hp /opt/hasamex || true
 
 # 11. Nginx Reverse Proxy
 echo ">> Configuring Nginx reverse proxy..."
@@ -149,7 +117,7 @@ server {
 
     client_max_body_size 50M;
 
-    # 1. API routes, Docs & OpenAPI to FastAPI
+    # 1. API routes, Docs & OpenAPI to FastAPI (PM2 hasamex-api on port 8000)
     location ~ ^/(api|docs|openapi\.json) {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
@@ -166,7 +134,7 @@ server {
         proxy_read_timeout 300s;
     }
 
-    # 2. Frontend web application routes and assets to Next.js server
+    # 2. Frontend web application routes and assets to Next.js (PM2 hasamex-web on port 3000)
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -183,13 +151,10 @@ EOF
 rm -f /etc/nginx/sites-enabled/default
 ln -sf /etc/nginx/sites-available/hasamex /etc/nginx/sites-enabled/hasamex
 
-# 12. Start Services
-echo ">> Starting systemd services..."
-systemctl daemon-reload
-systemctl stop hasamex || true
-systemctl disable hasamex || true
-systemctl enable --now hasamex-api hasamex-web
-systemctl restart hasamex-api hasamex-web nginx
+# 12. Start & Verify Services
+echo ">> Starting Nginx and checking PM2 process status..."
+systemctl restart nginx
+sudo -u www-data PM2_HOME="$PM2_HOME" pm2 status
 
 echo "=========================================================================="
 echo "Hasamex VM Bootstrap Complete at $(date -u)!"

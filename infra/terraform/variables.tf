@@ -44,7 +44,7 @@ variable "db_password" {
 variable "git_repo_url" {
   description = "Git repository URL to clone on the instance"
   type        = string
-  default     = "https://github.com/aisarthak/hasamex-task.git"
+  default     = "https://github.com/chill-czar/hasamex-task.git"
 }
 
 variable "git_branch" {

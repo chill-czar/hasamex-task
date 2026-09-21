@@ -35,7 +35,7 @@ jobs:
           pytest apps/api/tests/ -v
 
   frontend-build:
-    name: Frontend Lint & Static Export Build
+    name: Frontend Lint & Next.js Build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -56,6 +56,6 @@ jobs:
         working-directory: apps/web
         run: npx eslint .
 
-      - name: Build Next.js Static Export
+      - name: Build Next.js Application
         working-directory: apps/web
         run: npm run build

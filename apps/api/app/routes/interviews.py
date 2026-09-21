@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException
 from typing import List, Dict, Any
-from apps.api.app.models.canonical import Call, Expert, TranscriptSegment
+from apps.api.app.models.canonical import Call
 from apps.api.app.services.repository import get_repository
 
 router = APIRouter(prefix="/api/interviews", tags=["interviews"])

@@ -27,15 +27,15 @@ resource "google_compute_instance" "hasamex_vm" {
   }
 
   metadata_startup_script = templatefile("${path.module}/startup.sh.tpl", {
-    project_id             = var.project_id
-    git_repo_url           = var.git_repo_url
-    git_branch             = var.git_branch
-    gemini_secret_id       = google_secret_manager_secret.gemini_api_key.secret_id
-    fallback_gemini_key    = var.gemini_api_key
-    db_password_secret_id  = google_secret_manager_secret.db_password.secret_id
-    db_user                = google_sql_user.hasamex_user.name
-    db_host                = google_sql_database_instance.postgres.public_ip_address
-    db_name                = google_sql_database.hasamex.name
+    project_id            = var.project_id
+    git_repo_url          = var.git_repo_url
+    git_branch            = var.git_branch
+    gemini_secret_id      = google_secret_manager_secret.gemini_api_key.secret_id
+    fallback_gemini_key   = var.gemini_api_key
+    db_password_secret_id = google_secret_manager_secret.db_password.secret_id
+    db_user               = google_sql_user.hasamex_user.name
+    db_host               = google_sql_database_instance.postgres.public_ip_address
+    db_name               = google_sql_database.hasamex.name
   })
 
   depends_on = [

@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 from apps.api.app.models.canonical import GuideQuestionAnalysis
 from apps.api.app.services.analyzer import get_analyzer
 

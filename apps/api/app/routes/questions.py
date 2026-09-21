@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from apps.api.app.models.canonical import QueryAnswer, TranscriptSegment
 from apps.api.app.agents.router import get_intent_router
-from apps.api.app.services.analyzer import get_analyzer
 from apps.api.app.services.repository import get_repository
 
 router = APIRouter(prefix="/api", tags=["questions", "evidence"])
@@ -27,9 +26,9 @@ async def ask_question(req: AskQuestionRequest):
 @router.post("/questions/ask-stream")
 async def ask_question_stream(req: AskQuestionRequest):
     """Streams token-by-token answer via Server-Sent Events (SSE) followed by verified evidence chunk."""
-    analyzer = get_analyzer()
+    intent_router = get_intent_router()
     return StreamingResponse(
-        analyzer.ask_question_stream(req.query, market_filter=req.market_filter),
+        intent_router.process_query_stream(req.query, market_filter=req.market_filter),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -26,7 +26,7 @@ resource "google_sql_database_instance" "postgres" {
     }
 
     backup_configuration {
-      enabled    = false # Keep minimal and inexpensive
+      enabled = false # Keep minimal and inexpensive
     }
   }
 

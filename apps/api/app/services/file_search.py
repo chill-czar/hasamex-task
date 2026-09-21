@@ -106,7 +106,7 @@ class FileSearchService:
                         mime_type="text/plain",
                     )
 
-                    op = self.client.file_search_stores.upload_to_file_search_store(
+                    self.client.file_search_stores.upload_to_file_search_store(
                         file_search_store_name=self.store_name,
                         file=tmp_path,
                         config=upload_config,

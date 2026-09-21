@@ -1,7 +1,25 @@
-"""Intent Router for transcript analysis and grounded question answering."""
+"""Google ADK Agent and Intent Router for evidence-grounded transcript analysis.
+
+Architecture:
+  ADK Agent (Identity, Instructions, Tools, Orchestration)
+    │
+    ▼ (1. Retrieval Tool)
+  Canonical Repository & Google Managed File Search Store
+    │
+    ▼ (2. Reasoning & Synthesis via google-genai SDK)
+  Gemini 2.5/3.6 Flash Generation
+    │
+    ▼ (3. Evidence Validation Tool)
+  EvidenceValidator (Verbatim quote matching & timestamp snapping)
+    │
+    ▼ (4. Structured Output)
+  QueryAnswer (Pydantic model)
+"""
 
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Generator
+import google.adk as adk
+from apps.api.app.config import settings
 from apps.api.app.services.repository import get_repository
 from apps.api.app.services.analyzer import get_analyzer
 from apps.api.app.models.canonical import QueryAnswer, EvidenceItem
@@ -10,7 +28,7 @@ logger = logging.getLogger("hasamex.agent_router")
 
 
 class IntentRouter:
-    """Routes user queries deterministically to materialized syntheses or live Gemini Q&A."""
+    """Orchestrates query routing and evidence-grounded analysis via Google ADK Agent."""
 
     INTERVIEW_GUIDE = "INTERVIEW_GUIDE"
     CROSS_CALL_ANALYSIS = "CROSS_CALL_ANALYSIS"
@@ -22,6 +40,76 @@ class IntentRouter:
     def __init__(self):
         self.analyzer = get_analyzer()
         self.repo = get_repository()
+
+        # ---------------------------------------------------------------------
+        # Google ADK Tools: Capabilities exposed to the agent
+        # ---------------------------------------------------------------------
+        def search_canonical_transcripts(query: str, market: Optional[str] = None) -> List[Dict[str, Any]]:
+            """Searches canonical transcript segments matching the query keywords across European markets."""
+            words = [w for w in query.lower().split() if len(w) > 3]
+            segments = self.repo.search_segments(words, market=market)
+            return [
+                {
+                    "segment_id": s.segment_id,
+                    "call_id": s.call_id,
+                    "expert_id": s.expert_id,
+                    "speaker": s.speaker,
+                    "start_timestamp": s.start_timestamp,
+                    "end_timestamp": s.end_timestamp,
+                    "text": s.text,
+                }
+                for s in segments[:5]
+            ]
+
+        def get_guide_synthesis(question_id: int) -> Dict[str, Any]:
+            """Retrieves synthesized cross-market analysis and expert evidence for an interview guide question (1 to 6)."""
+            analysis = self.analyzer.get_guide_question_analysis(question_id)
+            if not analysis:
+                return {"error": f"Guide question {question_id} not found"}
+            return analysis.model_dump()
+
+        def get_market_insights(category: str = "themes") -> Dict[str, Any]:
+            """Retrieves cross-call common themes or contrasting viewpoints/disagreements across European markets."""
+            if "disagree" in category.lower() or "contrast" in category.lower():
+                disagreements = self.analyzer.get_disagreement_analyses()
+                return {"disagreements": [d.model_dump() for d in disagreements]}
+            themes = self.analyzer.get_theme_analyses()
+            return {"themes": [t.model_dump() for t in themes]}
+
+        def validate_evidence_quote(quote: str, call_id: Optional[str] = None) -> Dict[str, Any]:
+            """Validates whether a candidate quote verbatim exists in canonical transcripts and snaps timestamps."""
+            validator = self.repo.get_validator()
+            res = validator.validate_quote(quote, call_id=call_id)
+            return {
+                "is_valid": res.is_valid,
+                "verified_quote": res.verified_quote,
+                "confidence": res.confidence,
+                "timestamp": res.matched_segment.start_timestamp if res.matched_segment else None,
+                "notes": res.message,
+            }
+
+        # ---------------------------------------------------------------------
+        # Initialize Google ADK Agent
+        # ---------------------------------------------------------------------
+        self.root_agent = adk.Agent(
+            name="hasamex_interview_analyst",
+            model=settings.gemini_model,
+            description="Evidence-grounded expert research assistant analyzing European robotic surgery interview transcripts.",
+            instruction="""You are the Hasamex Expert Interview Analyst for European Robotic Surgery.
+Your primary directive is STRICT EVIDENCE GROUNDING:
+1. Analyze expert interview transcripts across France, Germany, and the UK.
+2. Retrieve relevant transcript segments and quotes using available tools.
+3. Always validate quotes and timestamps against canonical transcripts.
+4. Never fabricate quotes, timestamps, or clinical claims.
+5. Explicitly flag when evidence is insufficient.
+""",
+            tools=[
+                search_canonical_transcripts,
+                get_guide_synthesis,
+                get_market_insights,
+                validate_evidence_quote,
+            ],
+        )
 
     def detect_intent(self, query: str) -> str:
         """Deterministic intent detection to route explicit structural requests efficiently."""
@@ -158,6 +246,13 @@ class IntentRouter:
 
         # Grounded Q&A via analyzer
         return self.analyzer.ask_question(query, market_filter=market_filter)
+
+    def process_query_stream(
+        self, query: str, market_filter: Optional[str] = None
+    ):
+        """Streams grounded token reasoning via SSE followed by verified evidence chunk."""
+        for chunk in self.analyzer.ask_question_stream(query, market_filter=market_filter):
+            yield chunk
 
 
 _router_instance: Optional[IntentRouter] = None

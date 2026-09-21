@@ -8,8 +8,8 @@ to eliminate startup latency and cold-boot penalties.
 import asyncio
 import logging
 import time
-from typing import Dict, Any, List
-from apps.api.app.services.analyzer import get_analyzer, GUIDE_QUESTIONS
+from typing import Dict, Any
+from apps.api.app.services.analyzer import get_analyzer
 from apps.api.app.services.repository import get_repository
 
 logger = logging.getLogger("hasamex.precompute")

@@ -90,6 +90,6 @@ for i in {1..20}; do
 done
 
 echo "WARNING: Health check did not respond within expected time."
-echo "Check systemd status with:"
-echo "  gcloud compute ssh hasamex-platform-vm --zone=us-central1-a --command=\"sudo systemctl status hasamex\""
+echo "Check PM2 and Nginx process status with:"
+echo "  gcloud compute ssh hasamex-platform-vm --zone=us-central1-a --command=\"sudo -u www-data PM2_HOME=/opt/hasamex/.pm2 pm2 status && sudo systemctl status nginx\""
 

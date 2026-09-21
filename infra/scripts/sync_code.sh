@@ -47,49 +47,10 @@ gcloud compute ssh --quiet "${INSTANCE}" --zone="${ZONE}" --command="
   sudo npm run build
   cd /opt/hasamex
 
-  echo '>> Configuring systemd services: hasamex-api and hasamex-web...'
-  sudo tee /etc/systemd/system/hasamex-api.service > /dev/null <<EOF
-[Unit]
-Description=Hasamex FastAPI Backend Service
-After=network.target
-
-[Service]
-Type=simple
-User=www-data
-Group=www-data
-WorkingDirectory=/opt/hasamex
-EnvironmentFile=/opt/hasamex/.env
-ExecStart=/opt/hasamex/.venv/bin/uvicorn apps.api.app.main:app --host 127.0.0.1 --port 8000
-Restart=always
-RestartSec=3
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  sudo tee /etc/systemd/system/hasamex-web.service > /dev/null <<EOF
-[Unit]
-Description=Hasamex Next.js Frontend Server
-After=network.target hasamex-api.service
-
-[Service]
-Type=simple
-User=www-data
-Group=www-data
-WorkingDirectory=/opt/hasamex/apps/web
-Environment=NODE_ENV=production
-Environment=PORT=3000
-ExecStart=/usr/bin/npm run start -- -p 3000 -H 127.0.0.1
-Restart=always
-RestartSec=3
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
+  echo '>> Ensuring PM2 is installed...'
+  if ! command -v pm2 &> /dev/null; then
+    sudo npm install -g pm2
+  fi
 
   echo '>> Configuring Nginx reverse proxy...'
   sudo tee /etc/nginx/sites-available/hasamex > /dev/null <<EOF
@@ -100,16 +61,16 @@ server {
 
     client_max_body_size 50M;
 
-    # 1. API routes, Docs & OpenAPI to FastAPI
+    # 1. API routes, Docs & OpenAPI to FastAPI (PM2 hasamex-api on port 8000)
     location ~ ^/(api|docs|openapi\.json) {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \\\$http_upgrade;
+        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \"upgrade\";
-        proxy_set_header Host \\\$host;
-        proxy_set_header X-Real-IP \\\$remote_addr;
-        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \\\$scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
 
         # Disable buffering for Server-Sent Events (SSE) streaming
         proxy_buffering off;
@@ -117,16 +78,16 @@ server {
         proxy_read_timeout 300s;
     }
 
-    # 2. Frontend web application routes and assets to Next.js server
+    # 2. Frontend web application routes and assets to Next.js (PM2 hasamex-web on port 3000)
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \\\$http_upgrade;
+        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \"upgrade\";
-        proxy_set_header Host \\\$host;
-        proxy_set_header X-Real-IP \\\$remote_addr;
-        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \\\$scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 EOF
@@ -140,16 +101,23 @@ EOF
   sudo -u www-data bash -c \"cd /opt/hasamex && export \\\$(grep -v '^#' .env | xargs) && /opt/hasamex/.venv/bin/python3 -m apps.api.app.services.precompute\"
   set -e
 
-  echo '>> Setting permissions...'
-  sudo chown -R www-data:www-data /opt/hasamex
+  echo '>> Setting permissions and stopping legacy systemd units...'
+  sudo systemctl stop hasamex hasamex-api hasamex-web 2>/dev/null || true
+  sudo systemctl disable hasamex hasamex-api hasamex-web 2>/dev/null || true
 
-  echo '>> Restarting systemd services...'
-  sudo systemctl daemon-reload
-  sudo systemctl stop hasamex || true
-  sudo systemctl disable hasamex || true
-  sudo systemctl enable --now hasamex-api hasamex-web
-  sudo systemctl restart hasamex-api hasamex-web nginx
-  sudo systemctl status hasamex-api hasamex-web --no-pager
+  export PM2_HOME=\"/opt/hasamex/.pm2\"
+  sudo mkdir -p \"\$PM2_HOME\"
+  sudo chown -R www-data:www-data /opt/hasamex \"\$PM2_HOME\"
+
+  echo '>> Starting/Reloading processes with PM2...'
+  cd /opt/hasamex
+  sudo -u www-data PM2_HOME=\"\$PM2_HOME\" pm2 startOrReload ecosystem.config.js
+  sudo -u www-data PM2_HOME=\"\$PM2_HOME\" pm2 save
+  sudo env PATH=\$PATH:/usr/bin pm2 startup systemd -u www-data --hp /opt/hasamex || true
+
+  echo '>> Restarting Nginx...'
+  sudo systemctl restart nginx
+  sudo -u www-data PM2_HOME=\"\$PM2_HOME\" pm2 status
 "
 
 echo "=========================================================================="
