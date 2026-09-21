@@ -18,6 +18,13 @@ def normalize_text_for_matching(text: str) -> str:
     return t
 
 
+DEFAULT_MIN_MATCH_RATIO = 0.85
+CONTAINED_SEGMENT_CONFIDENCE = 0.98
+MAX_COMPARABLE_WORD_DELTA = 15
+WINDOW_SIZE_WORD_DELTA = 4
+MIN_WINDOW_WORDS = 5
+
+
 class EvidenceValidator:
     """Validates quotes against canonical transcripts, correcting timestamps and rejecting hallucinations."""
 
@@ -48,7 +55,7 @@ class EvidenceValidator:
         quote: str,
         call_id: Optional[str] = None,
         expert_id: Optional[str] = None,
-        min_match_ratio: float = 0.85,
+        min_match_ratio: float = DEFAULT_MIN_MATCH_RATIO,
     ) -> ValidationResult:
         """Validates whether a quote exists in the canonical transcripts."""
         if not quote or not quote.strip():
@@ -74,7 +81,19 @@ class EvidenceValidator:
             for c in self.calls:
                 candidate_segments.extend([s for s in c.segments if s.is_expert])
 
-        # Step 1: Direct substring search
+        # Fast path: literal exact substring in original segment text
+        stripped_quote = quote.strip(' "\'')
+        for seg in candidate_segments:
+            if stripped_quote in seg.text:
+                return ValidationResult(
+                    is_valid=True,
+                    verified_quote=stripped_quote,
+                    matched_segment=seg,
+                    confidence=1.0,
+                    message="Exact verbatim substring verified in canonical transcript",
+                )
+
+        # Step 1: Direct normalized substring search
         for seg in candidate_segments:
             seg_norm = normalize_text_for_matching(seg.text)
             if clean_quote in seg_norm or norm_clean_quote in seg_norm.lower():
@@ -98,7 +117,7 @@ class EvidenceValidator:
                     is_valid=True,
                     verified_quote=seg.text,
                     matched_segment=seg,
-                    confidence=0.98,
+                    confidence=CONTAINED_SEGMENT_CONFIDENCE,
                     message="Segment text fully contained within candidate quote",
                 )
 
@@ -115,7 +134,7 @@ class EvidenceValidator:
             seg_words = seg_norm.split()
 
             # If segment is roughly comparable in length
-            if len(seg_words) <= q_len + 15:
+            if len(seg_words) <= q_len + MAX_COMPARABLE_WORD_DELTA:
                 matcher = difflib.SequenceMatcher(None, norm_clean_quote, seg_norm.lower())
                 ratio = matcher.ratio()
                 if ratio > best_ratio:
@@ -124,7 +143,7 @@ class EvidenceValidator:
                     best_slice = seg.text
             else:
                 # Sliding window across longer segment
-                window_size = max(5, min(len(seg_words), q_len + 4))
+                window_size = max(MIN_WINDOW_WORDS, min(len(seg_words), q_len + WINDOW_SIZE_WORD_DELTA))
                 for w_start in range(0, max(1, len(seg_words) - window_size + 1)):
                     w_words = seg_words[w_start : w_start + window_size]
                     w_text = " ".join(w_words)

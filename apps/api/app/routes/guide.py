@@ -33,9 +33,12 @@ async def get_single_guide_question(question_id: int):
 
 @router.post("/analyze", response_model=GuideQuestionAnalysis)
 async def analyze_guide_question(req: AnalyzeRequest):
-    """Trigger analysis of a specific guide question."""
+    """Retrieve or refresh analysis for a specific guide question."""
     analyzer = get_analyzer()
+    if req.force_refresh:
+        analyzer._guide_analyses_cache.clear()
     analysis = analyzer.get_guide_question_analysis(req.question_id)
     if not analysis:
         raise HTTPException(status_code=404, detail=f"Guide question {req.question_id} not found")
     return analysis
+

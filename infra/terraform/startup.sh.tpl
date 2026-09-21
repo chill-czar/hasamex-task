@@ -74,9 +74,9 @@ python3 -m venv .venv
 if [ -f "$APP_DIR/pyproject.toml" ]; then
   .venv/bin/pip install -e .
 
-  # 7. Frontend Static Build
+  # 7. Frontend Build
   if [ -d "$APP_DIR/apps/web" ]; then
-    echo ">> Building Next.js static export..."
+    echo ">> Building Next.js application..."
     cd "$APP_DIR/apps/web"
     npm ci
     npm run build
@@ -93,11 +93,11 @@ fi
 # 9. Set permissions for www-data
 chown -R www-data:www-data "$APP_DIR"
 
-# 10. Systemd Service
-echo ">> Configuring systemd service: hasamex.service..."
-cat <<EOF > /etc/systemd/system/hasamex.service
+# 10. Systemd Services (Backend API & Frontend Web)
+echo ">> Configuring systemd services: hasamex-api and hasamex-web..."
+cat <<EOF > /etc/systemd/system/hasamex-api.service
 [Unit]
-Description=Hasamex Expert Interview Analysis Platform
+Description=Hasamex FastAPI Backend Service
 After=network.target
 
 [Service]
@@ -108,7 +108,29 @@ WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
 ExecStart=$APP_DIR/.venv/bin/uvicorn apps.api.app.main:app --host 127.0.0.1 --port 8000
 Restart=always
-RestartSec=5
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat <<EOF > /etc/systemd/system/hasamex-web.service
+[Unit]
+Description=Hasamex Next.js Frontend Server
+After=network.target hasamex-api.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=$APP_DIR/apps/web
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=/usr/bin/npm run start -- -p 3000 -H 127.0.0.1
+Restart=always
+RestartSec=3
 StandardOutput=journal
 StandardError=journal
 
@@ -126,7 +148,8 @@ server {
 
     client_max_body_size 50M;
 
-    location / {
+    # 1. API routes, Docs & OpenAPI to FastAPI
+    location ~ ^/(api|docs|openapi\.json) {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -141,6 +164,18 @@ server {
         proxy_cache off;
         proxy_read_timeout 300s;
     }
+
+    # 2. Frontend web application routes and assets to Next.js server
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
 }
 EOF
 
@@ -150,8 +185,10 @@ ln -sf /etc/nginx/sites-available/hasamex /etc/nginx/sites-enabled/hasamex
 # 12. Start Services
 echo ">> Starting systemd services..."
 systemctl daemon-reload
-systemctl enable --now hasamex
-systemctl restart nginx
+systemctl stop hasamex || true
+systemctl disable hasamex || true
+systemctl enable --now hasamex-api hasamex-web
+systemctl restart hasamex-api hasamex-web nginx
 
 echo "=========================================================================="
 echo "Hasamex VM Bootstrap Complete at $(date -u)!"

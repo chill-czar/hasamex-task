@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from typing import Optional
 from apps.api.app.models.canonical import QueryAnswer, TranscriptSegment
 from apps.api.app.agents.router import get_intent_router
 from apps.api.app.services.analyzer import get_analyzer
@@ -20,8 +20,8 @@ class AskQuestionRequest(BaseModel):
 @router.post("/questions/ask", response_model=QueryAnswer)
 async def ask_question(req: AskQuestionRequest):
     """Processes an arbitrary question across transcripts, grounded with exact quotes and timestamps."""
-    router_agent = get_intent_router()
-    return router_agent.process_query(req.query, market_filter=req.market_filter)
+    intent_router = get_intent_router()
+    return intent_router.process_query(req.query, market_filter=req.market_filter)
 
 
 @router.post("/questions/ask-stream")

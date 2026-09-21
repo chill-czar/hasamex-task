@@ -8,6 +8,7 @@ and grounded against the authoritative PostgreSQL/SQLite canonical database via 
 import hashlib
 import json
 import logging
+import re
 from typing import List, Optional, Dict, Any
 from google.genai import types
 from apps.api.app.config import settings
@@ -516,51 +517,67 @@ Transcripts:
             logger.warning(f"Failed to persist disagreements: {e}")
         return disagreements
 
-    def ask_question(self, query: str, market_filter: Optional[str] = None) -> QueryAnswer:
-        """Answers an arbitrary user question using live Google Cloud Gemini reasoning grounded in transcripts."""
-        if not self.client:
-            raise RuntimeError("Google GenAI client is not configured. Please set GEMINI_API_KEY in .env")
+    def _build_qa_prompt(self, query: str, full_context: str, streaming: bool = False) -> str:
+        """Constructs a clean, evidence-grounded prompt without redundant prompt-stuffing."""
+        evidence_instruction = (
+            "When finished answering, output on a new line:\n"
+            "===EVIDENCE===\n"
+            "followed immediately by a JSON object:\n"
+            "{\n"
+            '  "has_sufficient_evidence": true,\n'
+            '  "supporting_quotes": [\n'
+            "    {\n"
+            '      "call_id": "call_fr_01",\n'
+            '      "speaker": "Dr. Martin",\n'
+            '      "quote": "Exact verbatim quote from the transcript...",\n'
+            '      "relevance": "Why this quote supports the answer"\n'
+            "    }\n"
+            "  ],\n"
+            '  "themes_detected": ["Theme 1"],\n'
+            '  "markets_covered": ["France", "Germany"]\n'
+            "}"
+            if streaming
+            else (
+                "Output valid JSON adhering strictly to this schema:\n"
+                "{\n"
+                '  "answer": "Direct factual answer synthesized from transcripts...",\n'
+                '  "has_sufficient_evidence": true,\n'
+                '  "supporting_quotes": [\n'
+                "    {\n"
+                '      "call_id": "call_fr_01",\n'
+                '      "speaker": "Dr. Martin",\n'
+                '      "quote": "Exact verbatim quote from the transcript...",\n'
+                '      "relevance": "Why this quote supports the answer"\n'
+                "    }\n"
+                "  ],\n"
+                '  "themes_detected": ["Theme 1"],\n'
+                '  "markets_covered": ["France", "Germany"]\n'
+                "}"
+            )
+        )
 
-        # Retrieve relevant context segments using Google File Search or Canonical DB
-        retrieved_segments = self.file_search.search_file_search_store(query, market=market_filter)
-        context_lines = []
-        for s in retrieved_segments:
-            context_lines.append(f"[{s['start_timestamp']}] (Call: {s['call_id']}, Expert: {s['speaker']}): {s['text']}")
-
-        retrieval_context = "\n".join(context_lines)
-        full_context = self._get_transcripts_context(market_filter=market_filter)
-
-        prompt = f"""You are an evidence-grounded expert interview analyst.
+        return f"""You are an evidence-grounded expert interview analyst.
 Answer the user's research question based SOLELY on the European robotic surgery interview transcripts (France, Germany, UK) provided below.
 
 User Question: "{query}"
-
-Retrieved Relevant Segments:
-{retrieval_context}
 
 Full Authoritative Transcripts:
 {full_context}
 
 Instructions:
 1. Provide a direct, factual synthesis that directly answers the user's question.
-2. If the transcripts do not contain sufficient evidence to answer the question (e.g. topic is outside France/Germany/UK robotic surgery, or discusses other countries/specialties not mentioned in the transcripts), set "has_sufficient_evidence" to false and explain that clearly in "answer".
+2. If the transcripts do not contain sufficient evidence to answer the question (e.g. topic is outside France/Germany/UK robotic surgery, or discusses other countries/specialties not mentioned in the transcripts), state clearly that the transcripts do not contain information on this topic, and set "has_sufficient_evidence" to false.
 3. When evidence exists, extract exact verbatim quotes spoken by the experts and provide the call_id and speaker.
-4. Output valid JSON adhering strictly to this schema:
-{{
-  "answer": "Direct factual answer synthesized from transcripts...",
-  "has_sufficient_evidence": true,
-  "supporting_quotes": [
-    {{
-      "call_id": "call_fr_01",
-      "speaker": "Dr. Martin",
-      "quote": "Exact verbatim quote from the transcript...",
-      "relevance": "Why this quote supports the answer"
-    }}
-  ],
-  "themes_detected": ["Theme 1"],
-  "markets_covered": ["France", "Germany"]
-}}
+4. {evidence_instruction}
 """
+
+    def ask_question(self, query: str, market_filter: Optional[str] = None) -> QueryAnswer:
+        """Answers an arbitrary user question using live Google Cloud Gemini reasoning grounded in transcripts."""
+        if not self.client:
+            raise RuntimeError("Google GenAI client is not configured. Please set GEMINI_API_KEY in .env")
+
+        full_context = self._get_transcripts_context(market_filter=market_filter)
+        prompt = self._build_qa_prompt(query, full_context, streaming=False)
 
         response = self.client.models.generate_content(
             model=settings.gemini_model,
@@ -579,15 +596,30 @@ Instructions:
             raw_json = json.loads(raw_text.strip())
         except Exception as e:
             logger.warning(f"Error parsing json from Gemini response: {e}")
-            import re
-            m = re.search(r"\{.*\}", response.text or "", re.DOTALL)
-            if m:
+            ans_m = re.search(r'"answer":\s*"((?:\\.|[^"\\])*)"', response.text or "")
+            if ans_m:
                 try:
-                    raw_json = json.loads(m.group(0))
+                    ans_val = json.loads(f'"{ans_m.group(1)}"')
                 except Exception:
-                    raw_json = {"has_sufficient_evidence": True, "answer": response.text or "", "evidence": []}
+                    ans_val = ans_m.group(1)
             else:
-                raw_json = {"has_sufficient_evidence": True, "answer": response.text or "", "evidence": []}
+                ans_val = response.text or ""
+
+            # Robust fallback quote extraction from raw text
+            extracted_quotes = []
+            for qm in re.finditer(r'"quote":\s*"((?:\\.|[^"\\])*)"', response.text or ""):
+                try:
+                    q_text = json.loads(f'"{qm.group(1)}"')
+                except Exception:
+                    q_text = qm.group(1)
+                extracted_quotes.append({"quote": q_text})
+
+            has_ev = '"has_sufficient_evidence": false' not in (response.text or "").lower()
+            raw_json = {
+                "has_sufficient_evidence": has_ev,
+                "answer": ans_val,
+                "supporting_quotes": extracted_quotes,
+            }
 
         has_evidence = raw_json.get("has_sufficient_evidence", True)
         answer_text = raw_json.get("answer", "")
@@ -613,6 +645,19 @@ Instructions:
             if enriched:
                 validated_evidence.append(enriched)
 
+        # Fallback to search if LLM quotes failed validation
+        if not validated_evidence and has_evidence:
+            fallback_matches = self.file_search.search_file_search_store(query, market=market_filter)
+            for seg in fallback_matches[:3]:
+                enriched = self.validator.enrich_evidence_item({
+                    "quote": seg.get("text", "")[:120],
+                    "call_id": seg.get("call_id"),
+                    "speaker": seg.get("speaker"),
+                    "relevance": "Retrieved context segment",
+                })
+                if enriched:
+                    validated_evidence.append(enriched)
+
         markets = list({e.market for e in validated_evidence})
 
         return QueryAnswer(
@@ -630,46 +675,8 @@ Instructions:
             yield f"event: error\ndata: {json.dumps({'error': 'Google GenAI client is not configured.'})}\n\n"
             return
 
-        retrieved_segments = self.file_search.search_file_search_store(query, market=market_filter)
-        context_lines = []
-        for s in retrieved_segments:
-            context_lines.append(f"[{s['start_timestamp']}] (Call: {s['call_id']}, Expert: {s['speaker']}): {s['text']}")
-
-        retrieval_context = "\n".join(context_lines)
         full_context = self._get_transcripts_context(market_filter=market_filter)
-
-        prompt = f"""You are an evidence-grounded expert interview analyst.
-Answer the user's research question based SOLELY on the European robotic surgery interview transcripts (France, Germany, UK) provided below.
-
-User Question: "{query}"
-
-Retrieved Relevant Segments:
-{retrieval_context}
-
-Full Authoritative Transcripts:
-{full_context}
-
-Instructions:
-1. Provide a direct, factual synthesis that directly answers the user's question.
-2. If the transcripts do not contain sufficient evidence to answer the question (e.g. topic is outside France/Germany/UK robotic surgery), state clearly in your answer that the transcripts do not contain information on this topic.
-3. When evidence exists, cite the expert names and markets clearly.
-4. When finished answering, output on a new line:
-===EVIDENCE===
-followed immediately by a JSON object:
-{{
-  "has_sufficient_evidence": true,
-  "supporting_quotes": [
-    {{
-      "call_id": "call_fr_01",
-      "speaker": "Dr. Martin",
-      "quote": "Exact verbatim quote from the transcript...",
-      "relevance": "Why this quote supports the answer"
-    }}
-  ],
-  "themes_detected": ["Theme 1"],
-  "markets_covered": ["France", "Germany"]
-}}
-"""
+        prompt = self._build_qa_prompt(query, full_context, streaming=True)
 
         try:
             stream = self.client.models.generate_content_stream(
@@ -712,7 +719,15 @@ followed immediately by a JSON object:
                     evidence_buffer += chunk_text
 
             if not delimiter_found and buffer:
-                yield f"event: token\ndata: {json.dumps({'token': buffer})}\n\n"
+                delim_match = re.search(r"===+\s*EVIDENCE\s*===+", buffer)
+                if delim_match:
+                    ans = buffer[:delim_match.start()]
+                    ev = buffer[delim_match.end():]
+                    if ans:
+                        yield f"event: token\ndata: {json.dumps({'token': ans})}\n\n"
+                    evidence_buffer += ev
+                else:
+                    yield f"event: token\ndata: {json.dumps({'token': buffer})}\n\n"
 
             # Process evidence chunk
             validated_evidence = []
@@ -723,12 +738,12 @@ followed immediately by a JSON object:
             if evidence_buffer.strip():
                 try:
                     clean_json_str = evidence_buffer.strip()
-                    if "```json" in clean_json_str:
-                        clean_json_str = clean_json_str.split("```json")[1].split("```")[0]
-                    elif "```" in clean_json_str:
-                        clean_json_str = clean_json_str.split("```")[1].split("```")[0]
+                    json_match = re.search(r"\{.*\}", clean_json_str, re.DOTALL)
+                    if json_match:
+                        raw_json = json.loads(json_match.group(0))
+                    else:
+                        raw_json = json.loads(clean_json_str)
 
-                    raw_json = json.loads(clean_json_str.strip())
                     has_evidence = raw_json.get("has_sufficient_evidence", True)
                     themes_detected = raw_json.get("themes_detected", ["Live Grounded Retrieval"])
                     markets_covered = raw_json.get("markets_covered", ["Europe"])
@@ -745,8 +760,9 @@ followed immediately by a JSON object:
                 except Exception as parse_err:
                     logger.warning(f"Could not parse evidence JSON from stream: {parse_err}")
 
-            if not validated_evidence and has_evidence and retrieved_segments:
-                for seg in retrieved_segments[:3]:
+            if not validated_evidence and has_evidence:
+                fallback_matches = self.file_search.search_file_search_store(query, market=market_filter)
+                for seg in fallback_matches[:3]:
                     enriched = self.validator.enrich_evidence_item({
                         "quote": seg.get("text", "")[:120],
                         "call_id": seg.get("call_id"),

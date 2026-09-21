@@ -1,8 +1,7 @@
-"""Google ADK Agent and Intent Router for transcript analysis."""
+"""Intent Router for transcript analysis and grounded question answering."""
 
 import logging
-from typing import Dict, Any, Optional, List
-import google.adk as adk
+from typing import Optional, List
 from apps.api.app.services.repository import get_repository
 from apps.api.app.services.analyzer import get_analyzer
 from apps.api.app.models.canonical import QueryAnswer, EvidenceItem
@@ -10,39 +9,8 @@ from apps.api.app.models.canonical import QueryAnswer, EvidenceItem
 logger = logging.getLogger("hasamex.agent_router")
 
 
-# Tool definitions for ADK Agent
-def transcript_search_tool(query: str, market: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Searches canonical transcript segments matching the query keywords."""
-    repo = get_repository()
-    words = [w for w in query.lower().split() if len(w) > 3]
-    segments = repo.search_segments(words, market=market)
-    return [
-        {
-            "segment_id": s.segment_id,
-            "call_id": s.call_id,
-            "speaker": s.speaker,
-            "start_timestamp": s.start_timestamp,
-            "text": s.text,
-        }
-        for s in segments[:5]
-    ]
-
-
-def evidence_validation_tool(quote: str, call_id: Optional[str] = None) -> Dict[str, Any]:
-    """Validates whether a quote verbatim exists in the canonical transcripts."""
-    repo = get_repository()
-    validator = repo.get_validator()
-    res = validator.validate_quote(quote, call_id=call_id)
-    return {
-        "is_valid": res.is_valid,
-        "verified_quote": res.verified_quote,
-        "confidence": res.confidence,
-        "timestamp": res.matched_segment.start_timestamp if res.matched_segment else None,
-    }
-
-
 class IntentRouter:
-    """Routes user queries deterministically or via ADK Agent."""
+    """Routes user queries deterministically to materialized syntheses or live Gemini Q&A."""
 
     INTERVIEW_GUIDE = "INTERVIEW_GUIDE"
     CROSS_CALL_ANALYSIS = "CROSS_CALL_ANALYSIS"
@@ -55,32 +23,24 @@ class IntentRouter:
         self.analyzer = get_analyzer()
         self.repo = get_repository()
 
-        # Initialize Google ADK Agent
-        self.root_agent = adk.Agent(
-            name="hasamex_interview_analyst",
-            description="Expert research assistant that analyzes European robotic surgery transcripts with strict evidence grounding.",
-            instruction=(
-                "You are an evidence-grounded expert interview analyst. "
-                "You may only make factual claims supported by retrieved transcript evidence. "
-                "Never fabricate quotes, timestamps, expert names, or transcript content. "
-                "When evidence is insufficient, explicitly say so."
-            ),
-            tools=[transcript_search_tool, evidence_validation_tool],
-        )
-
     def detect_intent(self, query: str) -> str:
-        """Deterministic intent detection to eliminate unnecessary LLM calls."""
+        """Deterministic intent detection to route explicit structural requests efficiently."""
         q = query.strip().lower()
 
+        # Specific guide questions or general guide query
         if any(term in q for term in ["interview guide", "guide question", "question 1", "question 2", "question 3", "question 4", "question 5", "question 6"]):
             return self.INTERVIEW_GUIDE
-        elif any(term in q for term in ["theme", "common theme", "consensus", "shared view"]):
+        # Explicit overview requests for themes
+        elif any(term in q for term in ["all themes", "list themes", "common themes overview", "summary of themes"]):
             return self.THEME_ANALYSIS
-        elif any(term in q for term in ["disagree", "disagreement", "contrast", "difference", "contrasting", "conflict"]):
+        # Explicit overview requests for disagreements
+        elif any(term in q for term in ["all disagreements", "list disagreements", "contrasting viewpoints overview"]):
             return self.DISAGREEMENT_ANALYSIS
-        elif any(term in q for term in ["cross-call", "cross call", "compare expert", "compare markets", "across all"]):
+        # Explicit request for cross-call synthesis
+        elif any(term in q for term in ["cross-call overview", "compare all markets", "cross-market summary"]):
             return self.CROSS_CALL_ANALYSIS
-        elif any(term in q for term in ["segment", "lookup quote", "verify quote", "exact quote"]):
+        # Direct quote or segment lookup
+        elif any(term in q for term in ["lookup quote", "verify quote", "exact quote search"]):
             return self.EVIDENCE_LOOKUP
         return self.TRANSCRIPT_QA
 
@@ -129,8 +89,7 @@ class IntentRouter:
             )
 
         elif intent == self.INTERVIEW_GUIDE:
-            analyses = self.analyzer.get_interview_guide_analyses()
-            # If a specific question number is referenced, return that
+            # If a specific question number is referenced, return that precomputed synthesis
             q_num = None
             for i in range(1, 7):
                 if f"question {i}" in query.lower() or f"q{i}" in query.lower():
@@ -159,15 +118,15 @@ class IntentRouter:
             )
 
         elif intent == self.CROSS_CALL_ANALYSIS:
-            # Dynamically synthesize cross-call analysis using live Gemini
             return self.analyzer.ask_question(
                 f"Synthesize the overarching cross-call themes, differences, and key takeaways across France, Germany, and the UK: {query}",
                 market_filter=market_filter,
             )
 
         elif intent == self.EVIDENCE_LOOKUP:
-            search_results = transcript_search_tool(query, market=market_filter)
-            if not search_results:
+            words = [w for w in query.lower().split() if len(w) > 3]
+            matched_segments = self.repo.search_segments(words, market=market_filter)
+            if not matched_segments:
                 return QueryAnswer(
                     query=query,
                     answer="No matching canonical transcript segments found for the requested search query.",
@@ -177,12 +136,13 @@ class IntentRouter:
                     markets_covered=[],
                 )
             evidence_items = []
-            for r in search_results:
-                enriched = self.repo.get_validator().enrich_evidence_item({
-                    "segment_id": r["segment_id"],
-                    "call_id": r["call_id"],
-                    "speaker": r["speaker"],
-                    "quote": r["text"],
+            validator = self.repo.get_validator()
+            for s in matched_segments[:5]:
+                enriched = validator.enrich_evidence_item({
+                    "segment_id": s.segment_id,
+                    "call_id": s.call_id,
+                    "speaker": s.speaker,
+                    "quote": s.text,
                 })
                 if enriched:
                     evidence_items.append(enriched)
@@ -196,7 +156,7 @@ class IntentRouter:
                 markets_covered=list({e.market for e in evidence_items}),
             )
 
-        # Fallback to grounded Q&A
+        # Grounded Q&A via analyzer
         return self.analyzer.ask_question(query, market_filter=market_filter)
 
 
@@ -208,3 +168,4 @@ def get_intent_router() -> IntentRouter:
     if _router_instance is None:
         _router_instance = IntentRouter()
     return _router_instance
+

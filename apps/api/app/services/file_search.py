@@ -131,21 +131,22 @@ class FileSearchService:
             }
 
     def search_file_search_store(self, query: str, market: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Searches Google File Search Store if available, with canonical segment fallback."""
-        if self.is_available() and self.store_name:
-            try:
-                # Use Gemini model with Google File Search tool configuration
-                response = self.client.models.generate_content(
-                    model=settings.gemini_model,
-                    contents=f"Find exact relevant transcript quotes regarding: {query}",
-                )
-                logger.info(f"Retrieved response from Gemini / File Search for query: '{query}'")
-            except Exception as e:
-                logger.warning(f"File Search query exception: {e}. Falling back to canonical store.")
+        """Searches canonical segments for relevant context keywords."""
+        stop_words = {
+            "what", "when", "where", "which", "who", "whom", "this", "that", "these", "those",
+            "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "having",
+            "do", "does", "did", "doing", "a", "an", "the", "and", "but", "if", "because",
+            "as", "until", "while", "of", "at", "by", "for", "with", "about", "into", "through",
+            "during", "before", "after", "to", "from", "in", "out", "on", "off", "over", "under",
+            "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no",
+            "nor", "not", "only", "own", "same", "so", "than", "too", "very", "can", "will", "should"
+        }
+        raw_tokens = [w.strip("?,.:;\"'()[]{}") for w in query.lower().split()]
+        words = [w for w in raw_tokens if w and w not in stop_words]
+        if not words:
+            words = [w for w in raw_tokens if w]
 
-        # Canonical repository fallback
         repo = get_repository()
-        words = [w for w in query.lower().split() if len(w) > 3]
         matches = repo.search_segments(words, market=market, only_expert=True)
         return [
             {

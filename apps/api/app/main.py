@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from apps.api.app.config import settings
 from apps.api.app.routes.interviews import router as interviews_router
 from apps.api.app.routes.guide import router as guide_router
@@ -109,18 +108,13 @@ async def run_ingestion():
     }
 
 
-# Mount unified Next.js static export for single-instance deployment
-frontend_candidates = [
-    Path("apps/web/out"),
-    Path("/app/apps/web/out"),
-    Path("static"),
-    Path("/app/static"),
-]
-for candidate in frontend_candidates:
-    if candidate.exists() and (candidate / "index.html").exists():
-        app.mount("/", StaticFiles(directory=str(candidate), html=True), name="frontend")
-        logger.info(f"Mounted single-instance frontend from {candidate}")
-        break
+@app.get("/", include_in_schema=False)
+async def root():
+    return {
+        "service": "Hasamex Interview Analyst API",
+        "docs": "/docs",
+        "health": "/api/health",
+    }
 
 
 if __name__ == "__main__":
