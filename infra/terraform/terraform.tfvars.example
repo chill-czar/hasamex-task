@@ -1,0 +1,7 @@
+project_id     = "gen-lang-client-0072932240"
+region         = "us-central1"
+zone           = "us-central1-a"
+machine_type   = "e2-small"
+gemini_api_key = "YOUR_GEMINI_API_KEY_HERE"
+git_repo_url   = "https://github.com/aisarthak/hasamex-task.git"
+git_branch     = "main"

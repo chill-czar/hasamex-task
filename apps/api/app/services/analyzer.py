@@ -5,6 +5,7 @@ and Q&A responses are generated dynamically by Google Cloud Gemini (gemini-3.6-f
 and grounded against the authoritative PostgreSQL/SQLite canonical database via EvidenceValidator.
 """
 
+import hashlib
 import json
 import logging
 from typing import List, Optional, Dict, Any
@@ -35,6 +36,18 @@ GUIDE_QUESTIONS = {
 }
 
 
+def compute_content_hash(repository: CanonicalRepository, model: str) -> str:
+    """Computes a deterministic hash of canonical transcripts and model version."""
+    h = hashlib.sha256()
+    h.update(model.encode("utf-8"))
+    for call in repository.get_all_calls():
+        h.update(call.call_id.encode("utf-8"))
+        for s in call.segments:
+            h.update(s.segment_id.encode("utf-8"))
+            h.update(s.text.encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
 class GroundedAnalyzer:
     """Analyzes expert transcripts using live Google Cloud Gemini models with canonical evidence grounding."""
 
@@ -43,6 +56,7 @@ class GroundedAnalyzer:
         self.validator = self.repo.get_validator()
         self.file_search = get_file_search_service()
         self.client = None
+        self.content_hash = compute_content_hash(self.repo, settings.gemini_model)
 
         if settings.is_gemini_available:
             try:
@@ -56,6 +70,45 @@ class GroundedAnalyzer:
         self._guide_analyses_cache: Dict[int, GuideQuestionAnalysis] = {}
         self._themes_cache: Optional[List[ThemeItem]] = None
         self._disagreements_cache: Optional[List[DisagreementItem]] = None
+
+        # Warm memory cache immediately from persisted database if available
+        self.warm_cache()
+
+    def warm_cache(self) -> None:
+        """Loads all precomputed analyses from the database into memory if content hash matches."""
+        try:
+            all_mat = self.repo.get_all_materialized_analyses()
+            loaded_count = 0
+            for key, record in all_mat.items():
+                if record["content_hash"] != self.content_hash:
+                    continue
+                payload = json.loads(record["payload_json"])
+                if key.startswith("guide_q"):
+                    try:
+                        q_id = int(key.replace("guide_q", ""))
+                        self._guide_analyses_cache[q_id] = GuideQuestionAnalysis.model_validate(payload)
+                        loaded_count += 1
+                    except Exception as e:
+                        logger.warning(f"Error deserializing cached {key}: {e}")
+                elif key == "themes":
+                    try:
+                        self._themes_cache = [ThemeItem.model_validate(item) for item in payload]
+                    except Exception as e:
+                        logger.warning(f"Error deserializing cached themes: {e}")
+                elif key == "disagreements":
+                    try:
+                        self._disagreements_cache = [DisagreementItem.model_validate(item) for item in payload]
+                    except Exception as e:
+                        logger.warning(f"Error deserializing cached disagreements: {e}")
+
+            if loaded_count > 0 or self._themes_cache or self._disagreements_cache:
+                logger.info(
+                    f"Warmed cache from database: {loaded_count}/6 guide questions, "
+                    f"themes={'yes' if self._themes_cache else 'no'}, "
+                    f"disagreements={'yes' if self._disagreements_cache else 'no'}"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to warm cache from database: {e}")
 
     def _get_transcripts_context(self, market_filter: Optional[str] = None) -> str:
         """Builds formatted authoritative context from canonical transcript segments."""
@@ -86,8 +139,17 @@ class GroundedAnalyzer:
 
     def get_guide_question_analysis(self, question_id: int, force_refresh: bool = False) -> Optional[GuideQuestionAnalysis]:
         """Analyzes a single interview guide question dynamically using live Google Cloud Gemini."""
-        if not force_refresh and question_id in self._guide_analyses_cache:
-            return self._guide_analyses_cache[question_id]
+        if not force_refresh:
+            if question_id in self._guide_analyses_cache:
+                return self._guide_analyses_cache[question_id]
+            cached = self.repo.get_materialized_analysis(f"guide_q{question_id}")
+            if cached and cached["content_hash"] == self.content_hash:
+                try:
+                    analysis = GuideQuestionAnalysis.model_validate(json.loads(cached["payload_json"]))
+                    self._guide_analyses_cache[question_id] = analysis
+                    return analysis
+                except Exception as e:
+                    logger.warning(f"Error restoring cached guide_q{question_id}: {e}")
 
         question_text = GUIDE_QUESTIONS.get(question_id)
         if not question_text:
@@ -216,12 +278,29 @@ Transcripts:
         )
 
         self._guide_analyses_cache[question_id] = analysis
+        try:
+            self.repo.save_materialized_analysis(
+                f"guide_q{question_id}",
+                self.content_hash,
+                analysis.model_dump_json(),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to persist materialized guide_q{question_id}: {e}")
         return analysis
 
     def get_theme_analyses(self, force_refresh: bool = False) -> List[ThemeItem]:
         """Identifies common themes across all 3 transcripts using live Google Cloud Gemini reasoning."""
-        if not force_refresh and self._themes_cache is not None:
-            return self._themes_cache
+        if not force_refresh:
+            if self._themes_cache is not None:
+                return self._themes_cache
+            cached = self.repo.get_materialized_analysis("themes")
+            if cached and cached["content_hash"] == self.content_hash:
+                try:
+                    themes = [ThemeItem.model_validate(item) for item in json.loads(cached["payload_json"])]
+                    self._themes_cache = themes
+                    return themes
+                except Exception as e:
+                    logger.warning(f"Error restoring cached themes: {e}")
 
         if not self.client:
             raise RuntimeError("Google GenAI client is not configured. Please set GEMINI_API_KEY in .env")
@@ -307,12 +386,26 @@ Transcripts:
             )
 
         self._themes_cache = themes
+        try:
+            payload = json.dumps([t.model_dump() for t in themes])
+            self.repo.save_materialized_analysis("themes", self.content_hash, payload)
+        except Exception as e:
+            logger.warning(f"Failed to persist themes: {e}")
         return themes
 
     def get_disagreement_analyses(self, force_refresh: bool = False) -> List[DisagreementItem]:
         """Identifies contrasting viewpoints across interviews using live Google Cloud Gemini reasoning."""
-        if not force_refresh and self._disagreements_cache is not None:
-            return self._disagreements_cache
+        if not force_refresh:
+            if self._disagreements_cache is not None:
+                return self._disagreements_cache
+            cached = self.repo.get_materialized_analysis("disagreements")
+            if cached and cached["content_hash"] == self.content_hash:
+                try:
+                    disagreements = [DisagreementItem.model_validate(item) for item in json.loads(cached["payload_json"])]
+                    self._disagreements_cache = disagreements
+                    return disagreements
+                except Exception as e:
+                    logger.warning(f"Error restoring cached disagreements: {e}")
 
         if not self.client:
             raise RuntimeError("Google GenAI client is not configured. Please set GEMINI_API_KEY in .env")
@@ -416,6 +509,11 @@ Transcripts:
             )
 
         self._disagreements_cache = disagreements
+        try:
+            payload = json.dumps([d.model_dump() for d in disagreements])
+            self.repo.save_materialized_analysis("disagreements", self.content_hash, payload)
+        except Exception as e:
+            logger.warning(f"Failed to persist disagreements: {e}")
         return disagreements
 
     def ask_question(self, query: str, market_filter: Optional[str] = None) -> QueryAnswer:
@@ -505,6 +603,156 @@ Instructions:
             themes_detected=raw_json.get("themes_detected", ["Live Grounded Retrieval"]),
             markets_covered=markets if markets else ["Europe"],
         )
+
+    def ask_question_stream(self, query: str, market_filter: Optional[str] = None):
+        """Streams live grounded response token-by-token followed by verified evidence."""
+        if not self.client:
+            yield f"event: error\ndata: {json.dumps({'error': 'Google GenAI client is not configured.'})}\n\n"
+            return
+
+        retrieved_segments = self.file_search.search_file_search_store(query, market=market_filter)
+        context_lines = []
+        for s in retrieved_segments:
+            context_lines.append(f"[{s['start_timestamp']}] (Call: {s['call_id']}, Expert: {s['speaker']}): {s['text']}")
+
+        retrieval_context = "\n".join(context_lines)
+        full_context = self._get_transcripts_context(market_filter=market_filter)
+
+        prompt = f"""You are an evidence-grounded expert interview analyst.
+Answer the user's research question based SOLELY on the European robotic surgery interview transcripts (France, Germany, UK) provided below.
+
+User Question: "{query}"
+
+Retrieved Relevant Segments:
+{retrieval_context}
+
+Full Authoritative Transcripts:
+{full_context}
+
+Instructions:
+1. Provide a direct, factual synthesis that directly answers the user's question.
+2. If the transcripts do not contain sufficient evidence to answer the question (e.g. topic is outside France/Germany/UK robotic surgery), state clearly in your answer that the transcripts do not contain information on this topic.
+3. When evidence exists, cite the expert names and markets clearly.
+4. When finished answering, output on a new line:
+===EVIDENCE===
+followed immediately by a JSON object:
+{{
+  "has_sufficient_evidence": true,
+  "supporting_quotes": [
+    {{
+      "call_id": "call_fr_01",
+      "speaker": "Dr. Martin",
+      "quote": "Exact verbatim quote from the transcript...",
+      "relevance": "Why this quote supports the answer"
+    }}
+  ],
+  "themes_detected": ["Theme 1"],
+  "markets_covered": ["France", "Germany"]
+}}
+"""
+
+        try:
+            stream = self.client.models.generate_content_stream(
+                model=settings.gemini_model,
+                contents=prompt,
+            )
+
+            delimiter = "===EVIDENCE==="
+            buffer = ""
+            delimiter_found = False
+            evidence_buffer = ""
+
+            for chunk in stream:
+                chunk_text = chunk.text or ""
+                if not chunk_text:
+                    continue
+
+                if not delimiter_found:
+                    buffer += chunk_text
+                    if delimiter in buffer:
+                        delimiter_found = True
+                        ans, ev = buffer.split(delimiter, 1)
+                        if ans:
+                            yield f"event: token\ndata: {json.dumps({'token': ans})}\n\n"
+                        evidence_buffer += ev
+                    else:
+                        hold = 0
+                        for i in range(1, min(len(buffer), len(delimiter)) + 1):
+                            if delimiter.startswith(buffer[-i:]):
+                                hold = i
+                        if hold > 0:
+                            to_emit = buffer[:-hold]
+                            buffer = buffer[-hold:]
+                        else:
+                            to_emit = buffer
+                            buffer = ""
+                        if to_emit:
+                            yield f"event: token\ndata: {json.dumps({'token': to_emit})}\n\n"
+                else:
+                    evidence_buffer += chunk_text
+
+            if not delimiter_found and buffer:
+                yield f"event: token\ndata: {json.dumps({'token': buffer})}\n\n"
+
+            # Process evidence chunk
+            validated_evidence = []
+            themes_detected = ["Live Grounded Retrieval"]
+            markets_covered = ["Europe"]
+            has_evidence = True
+
+            if evidence_buffer.strip():
+                try:
+                    clean_json_str = evidence_buffer.strip()
+                    if "```json" in clean_json_str:
+                        clean_json_str = clean_json_str.split("```json")[1].split("```")[0]
+                    elif "```" in clean_json_str:
+                        clean_json_str = clean_json_str.split("```")[1].split("```")[0]
+
+                    raw_json = json.loads(clean_json_str.strip())
+                    has_evidence = raw_json.get("has_sufficient_evidence", True)
+                    themes_detected = raw_json.get("themes_detected", ["Live Grounded Retrieval"])
+                    markets_covered = raw_json.get("markets_covered", ["Europe"])
+
+                    for sq in raw_json.get("supporting_quotes", []):
+                        enriched = self.validator.enrich_evidence_item({
+                            "quote": sq.get("quote", ""),
+                            "call_id": sq.get("call_id"),
+                            "speaker": sq.get("speaker"),
+                            "relevance": sq.get("relevance"),
+                        })
+                        if enriched:
+                            validated_evidence.append(enriched)
+                except Exception as parse_err:
+                    logger.warning(f"Could not parse evidence JSON from stream: {parse_err}")
+
+            if not validated_evidence and has_evidence and retrieved_segments:
+                for seg in retrieved_segments[:3]:
+                    enriched = self.validator.enrich_evidence_item({
+                        "quote": seg.get("text", "")[:120],
+                        "call_id": seg.get("call_id"),
+                        "speaker": seg.get("speaker"),
+                        "relevance": "Retrieved context segment",
+                    })
+                    if enriched:
+                        validated_evidence.append(enriched)
+
+            if validated_evidence:
+                markets = list({e.market for e in validated_evidence})
+                if markets:
+                    markets_covered = markets
+
+            evidence_payload = {
+                "has_sufficient_evidence": has_evidence,
+                "evidence": [e.model_dump() for e in validated_evidence],
+                "themes_detected": themes_detected,
+                "markets_covered": markets_covered,
+            }
+            yield f"event: evidence\ndata: {json.dumps(evidence_payload)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'status': 'complete'})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Error during streaming Q&A: {e}")
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
 
 
 _analyzer_instance: Optional[GroundedAnalyzer] = None

@@ -2,8 +2,11 @@
 
 import time
 import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from apps.api.app.config import settings
 from apps.api.app.routes.interviews import router as interviews_router
 from apps.api.app.routes.guide import router as guide_router
@@ -11,6 +14,7 @@ from apps.api.app.routes.insights import router as insights_router
 from apps.api.app.routes.questions import router as questions_router
 from apps.api.app.services.repository import get_repository
 from apps.api.app.services.file_search import get_file_search_service
+from apps.api.app.services.analyzer import get_analyzer
 
 # Setup logging
 logging.basicConfig(
@@ -19,10 +23,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger("hasamex.main")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Warm canonical repository and persisted database cache on startup."""
+    try:
+        repo = get_repository()
+        analyzer = get_analyzer()
+        analyzer.warm_cache()
+        logger.info(f"Startup complete: {len(repo.get_all_calls())} canonical calls indexed, cache ready.")
+    except Exception as e:
+        logger.warning(f"Error during startup cache warming: {e}")
+    yield
+
+
 app = FastAPI(
     title="Hasamex Expert Interview Analysis Platform API",
     description="Evidence-grounded analysis of European Robotic Surgery expert interview calls.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS middleware for Next.js frontend
@@ -88,6 +107,20 @@ async def run_ingestion():
         "segments_ingested": len(repo.segments_by_id),
         "file_search": fs_result,
     }
+
+
+# Mount unified Next.js static export for single-instance deployment
+frontend_candidates = [
+    Path("apps/web/out"),
+    Path("/app/apps/web/out"),
+    Path("static"),
+    Path("/app/static"),
+]
+for candidate in frontend_candidates:
+    if candidate.exists() and (candidate / "index.html").exists():
+        app.mount("/", StaticFiles(directory=str(candidate), html=True), name="frontend")
+        logger.info(f"Mounted single-instance frontend from {candidate}")
+        break
 
 
 if __name__ == "__main__":

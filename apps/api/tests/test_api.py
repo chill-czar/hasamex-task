@@ -101,3 +101,16 @@ async def test_api_ask_questions():
         data_invalid = res_invalid.json()
         assert data_invalid["has_sufficient_evidence"] is False
         assert len(data_invalid["evidence"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_api_ask_questions_stream():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        payload = {"query": "What are the main adoption barriers?"}
+        res = await ac.post("/api/questions/ask-stream", json=payload)
+        assert res.status_code == 200
+        assert "text/event-stream" in res.headers["content-type"]
+        body = res.text
+        assert "event: token" in body or "event: evidence" in body
+        assert "event: done" in body

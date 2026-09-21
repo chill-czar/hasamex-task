@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+
+# Python
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov
+
+# Node / Web
+node_modules
+apps/web/node_modules
+apps/web/.next
+apps/web/out
+
+# Local databases and states
+*.db
+*.sqlite
+*.sqlite3
+hasamex.db
+
+# Terraform
+.terraform
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# IDE & OS
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store

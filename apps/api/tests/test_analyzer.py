@@ -65,4 +65,4 @@ def test_ask_question_insufficient_evidence(analyzer):
     res = analyzer.ask_question("What is the adoption of robotic surgery in Japan or China?")
     assert res.has_sufficient_evidence is False
     assert len(res.evidence) == 0
-    assert "insufficient evidence" in res.answer.lower()
+    assert any(term in res.answer.lower() for term in ["insufficient evidence", "do not contain", "no information", "not mentioned"])

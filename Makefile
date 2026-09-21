@@ -42,6 +42,11 @@ eval:
 	@echo ">> Running quantitative evaluation against ground truth benchmarks..."
 	$(PYTHON) evaluation/evaluate.py
 
+benchmark-latency:
+	@echo ">> Running end-to-end latency benchmarks across API and architecture..."
+	$(PYTHON) evaluation/benchmark_latency.py
+
+
 run-backend:
 	@echo ">> Starting FastAPI backend on http://localhost:8000..."
 	$(UVICORN) apps.api.app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -54,6 +59,14 @@ dev:
 	@echo "To run both concurrently in separate terminals:"
 	@echo "  Terminal 1: make run-backend"
 	@echo "  Terminal 2: make run-frontend"
+
+deploy-infra:
+	@echo ">> Provisioning infrastructure and deploying to Google Cloud (Zero Docker)..."
+	./infra/scripts/deploy_vm.sh
+
+sync-code:
+	@echo ">> Syncing code to live Google Cloud VM..."
+	./infra/scripts/sync_code.sh
 
 docker-build:
 	@echo ">> Building Docker Compose containers..."
