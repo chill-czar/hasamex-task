@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ID=$(gcloud config get-value project)
+PROJECT_ID=$(gcloud config get-value project 2>/dev/null || echo "")
+if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "(unset)" ]; then
+  PROJECT_ID="gen-lang-client-0072932240"
+fi
 REGION="${1:-us-central1}"
 BUCKET_NAME="hasamex-tfstate-${PROJECT_ID}"
 
@@ -12,8 +15,8 @@ echo "Region:  ${REGION}"
 echo "Bucket:  gs://${BUCKET_NAME}"
 echo "=========================================================================="
 
-echo ">> Enabling Cloud Resource Manager and Storage APIs..."
-gcloud services enable cloudresourcemanager.googleapis.com storage.googleapis.com --project="${PROJECT_ID}"
+echo ">> Checking Cloud Storage APIs..."
+gcloud services enable cloudresourcemanager.googleapis.com storage.googleapis.com --project="${PROJECT_ID}" 2>/dev/null || true
 
 if ! gcloud storage buckets describe "gs://${BUCKET_NAME}" &>/dev/null; then
   echo ">> Creating state bucket gs://${BUCKET_NAME}..."
