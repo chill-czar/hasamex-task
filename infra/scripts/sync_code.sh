@@ -34,11 +34,11 @@ tar --exclude='.git' \
 
 # Copy to VM via gcloud compute scp
 echo ">> Uploading archive to ${INSTANCE}..."
-gcloud compute scp "${BUNDLE_PATH}" "${INSTANCE}:/tmp/hasamex-deploy.tar.gz" --zone="${ZONE}"
+gcloud compute scp --quiet "${BUNDLE_PATH}" "${INSTANCE}:/tmp/hasamex-deploy.tar.gz" --zone="${ZONE}"
 
 # Execute update on VM
 echo ">> Extracting and setting up application on VM..."
-gcloud compute ssh "${INSTANCE}" --zone="${ZONE}" --command='
+gcloud compute ssh --quiet "${INSTANCE}" --zone="${ZONE}" --command='
   set -euo pipefail
   echo ">> Unpacking archive to /opt/hasamex..."
   sudo tar -xzf /tmp/hasamex-deploy.tar.gz -C /opt/hasamex/
