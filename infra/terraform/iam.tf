@@ -55,3 +55,10 @@ resource "google_project_iam_member" "sa_user" {
   role    = "roles/iam.serviceAccountUser"
   member  = "serviceAccount:${google_service_account.vm_sa.email}"
 }
+
+# Service Usage Admin: allows Terraform to verify and enable required APIs
+resource "google_project_iam_member" "service_usage_admin" {
+  project = var.project_id
+  role    = "roles/serviceusage.serviceUsageAdmin"
+  member  = "serviceAccount:${google_service_account.vm_sa.email}"
+}
