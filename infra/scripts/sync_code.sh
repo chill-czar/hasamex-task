@@ -29,8 +29,13 @@ gcloud compute ssh --quiet "${INSTANCE}" --zone="${ZONE}" --command="
     sudo git reset --hard origin/${BRANCH}
   fi
 
+  echo '>> Ensuring python3.12-venv is installed...'
+  sudo apt-get update -y -qq
+  sudo apt-get install -y --no-install-recommends python3-venv python3.12-venv python3-pip
+
   echo '>> Setting up Python virtual environment...'
-  if [ ! -d /opt/hasamex/.venv ]; then
+  if [ ! -f /opt/hasamex/.venv/bin/pip ]; then
+    sudo rm -rf /opt/hasamex/.venv
     sudo python3 -m venv /opt/hasamex/.venv
   fi
   sudo /opt/hasamex/.venv/bin/pip install --upgrade pip
