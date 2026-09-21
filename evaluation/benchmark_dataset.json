@@ -1,0 +1,171 @@
+{
+  "project": "Hasamex European Robotic Surgery Market Study",
+  "transcripts": [
+    {
+      "call_id": "call_fr_01",
+      "expert_id": "expert_fr_martin",
+      "expert_name": "Dr. Jean Martin",
+      "market": "France",
+      "role": "Head of Urology"
+    },
+    {
+      "call_id": "call_de_02",
+      "expert_id": "expert_de_keller",
+      "expert_name": "Anna Keller",
+      "market": "Germany",
+      "role": "Former Hospital Procurement Director"
+    },
+    {
+      "call_id": "call_uk_03",
+      "expert_id": "expert_gb_carter",
+      "expert_name": "Dr. Emily Carter",
+      "market": "United Kingdom",
+      "role": "Consultant Urologist"
+    }
+  ],
+  "guide_questions": [
+    {
+      "question_id": 1,
+      "question": "How would you describe current adoption of robotic surgery in your market?",
+      "expected_expert_quotes": [
+        {
+          "expert_id": "expert_fr_martin",
+          "expected_substring": "concentrated in larger academic hospitals and private centres with stronger capital budgets",
+          "expected_timestamp": "00:18"
+        },
+        {
+          "expert_id": "expert_de_keller",
+          "expected_substring": "Large university hospitals are much more advanced, while many smaller hospitals are still waiting",
+          "expected_timestamp": "00:16"
+        },
+        {
+          "expert_id": "expert_gb_carter",
+          "expected_substring": "in some larger NHS trusts robotic surgery is becoming standard for selected procedures",
+          "expected_timestamp": "00:14"
+        }
+      ]
+    },
+    {
+      "question_id": 2,
+      "question": "What are the main barriers to adoption?",
+      "expected_expert_quotes": [
+        {
+          "expert_id": "expert_fr_martin",
+          "expected_substring": "The biggest issue is still capital budget approval",
+          "expected_timestamp": "01:20"
+        },
+        {
+          "expert_id": "expert_de_keller",
+          "expected_substring": "Cost is the first barrier. These are large capital purchases",
+          "expected_timestamp": "01:10"
+        },
+        {
+          "expert_id": "expert_gb_carter",
+          "expected_substring": "Funding is important, but I would say training capacity is just as important",
+          "expected_timestamp": "01:05"
+        }
+      ]
+    },
+    {
+      "question_id": 3,
+      "question": "How important are hospital budgets and ROI in purchasing decisions?",
+      "expected_expert_quotes": [
+        {
+          "expert_id": "expert_fr_martin",
+          "expected_substring": "Very important. The clinical argument may get surgeons interested, but the finance team wants to understand utilisation",
+          "expected_timestamp": "02:18"
+        },
+        {
+          "expert_id": "expert_de_keller",
+          "expected_substring": "A strong clinical case helps, but the economic case decides whether it gets approved",
+          "expected_timestamp": "02:08"
+        },
+        {
+          "expert_id": "expert_gb_carter",
+          "expected_substring": "I would say economics and clinical strategy are balanced",
+          "expected_timestamp": "03:10"
+        }
+      ]
+    },
+    {
+      "question_id": 4,
+      "question": "How important are surgeon training and clinical outcomes?",
+      "expected_expert_quotes": [
+        {
+          "expert_id": "expert_fr_martin",
+          "expected_substring": "If only one surgeon can use the system, the economics become difficult",
+          "expected_timestamp": "03:10"
+        },
+        {
+          "expert_id": "expert_de_keller",
+          "expected_substring": "Very important operationally. If the hospital buys a system but only one surgeon is comfortable using it, utilisation will be poor",
+          "expected_timestamp": "03:05"
+        },
+        {
+          "expert_id": "expert_gb_carter",
+          "expected_substring": "The key point is that adoption is not just about buying the machine",
+          "expected_timestamp": "06:04"
+        }
+      ]
+    },
+    {
+      "question_id": 5,
+      "question": "What adoption trend do you expect over the next 3–5 years?",
+      "expected_expert_quotes": [
+        {
+          "expert_id": "expert_fr_martin",
+          "expected_substring": "I would expect maybe 15 to 20 percent more procedures annually in some of the stronger centres",
+          "expected_timestamp": "05:07"
+        },
+        {
+          "expert_id": "expert_de_keller",
+          "expected_substring": "closer to high single digits or low double digits in procedure volumes rather than something like 20 percent",
+          "expected_timestamp": "05:08"
+        },
+        {
+          "expert_id": "expert_gb_carter",
+          "expected_substring": "I could see procedure growth above 15 percent annually in some areas",
+          "expected_timestamp": "04:06"
+        }
+      ]
+    },
+    {
+      "question_id": 6,
+      "question": "What is the typical hospital decision-making timeline for purchasing a new robotic system?",
+      "expected_expert_quotes": [
+        {
+          "expert_id": "expert_fr_martin",
+          "expected_substring": "Six to twelve months is realistic once the hospital becomes serious",
+          "expected_timestamp": "06:08"
+        },
+        {
+          "expert_id": "expert_de_keller",
+          "expected_substring": "Nine to eighteen months is common. Procurement, clinical leadership, finance and management all need to align",
+          "expected_timestamp": "06:05"
+        },
+        {
+          "expert_id": "expert_gb_carter",
+          "expected_substring": "Around six to nine months can happen if funding is already available",
+          "expected_timestamp": "05:04"
+        }
+      ]
+    }
+  ],
+  "test_queries": [
+    {
+      "query": "What are the main adoption barriers?",
+      "expected_has_evidence": true,
+      "min_evidence_count": 2
+    },
+    {
+      "query": "Where do the experts disagree about ROI and growth?",
+      "expected_has_evidence": true,
+      "min_evidence_count": 2
+    },
+    {
+      "query": "What is the robotic surgery adoption in Tokyo, Japan?",
+      "expected_has_evidence": false,
+      "min_evidence_count": 0
+    }
+  ]
+}
