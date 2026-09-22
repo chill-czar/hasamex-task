@@ -517,7 +517,22 @@ Transcripts:
             logger.warning(f"Failed to persist disagreements: {e}")
         return disagreements
 
-    def _build_qa_prompt(self, query: str, full_context: str, streaming: bool = False) -> str:
+    def _get_retrieved_context(self, query: str, market_filter: Optional[str] = None) -> str:
+        """Retrieves top relevant transcript segments using FileSearchService instead of full prompt-stuffing."""
+        segments = self.file_search.search_file_search_store(query, market=market_filter)
+        if not segments:
+            return "No relevant transcript segments found."
+
+        lines = []
+        for s in segments:
+            cid = s.get("call_id", "")
+            spk = s.get("speaker", "")
+            ts = s.get("start_timestamp", "")
+            txt = s.get("text", "")
+            lines.append(f"[{cid} - {spk} at {ts}]: {txt}")
+        return "\n\n".join(lines)
+
+    def _build_qa_prompt(self, query: str, context: str, streaming: bool = False) -> str:
         """Constructs a clean, evidence-grounded prompt without redundant prompt-stuffing."""
         evidence_instruction = (
             "When finished answering, output on a new line:\n"
@@ -561,8 +576,8 @@ Answer the user's research question based SOLELY on the European robotic surgery
 
 User Question: "{query}"
 
-Full Authoritative Transcripts:
-{full_context}
+Relevant Retrieved Transcript Context:
+{context}
 
 Instructions:
 1. Provide a direct, factual synthesis that directly answers the user's question.
@@ -576,8 +591,8 @@ Instructions:
         if not self.client:
             raise RuntimeError("Google GenAI client is not configured. Please set GEMINI_API_KEY in .env")
 
-        full_context = self._get_transcripts_context(market_filter=market_filter)
-        prompt = self._build_qa_prompt(query, full_context, streaming=False)
+        retrieved_context = self._get_retrieved_context(query, market_filter=market_filter)
+        prompt = self._build_qa_prompt(query, retrieved_context, streaming=False)
 
         response = self.client.models.generate_content(
             model=settings.gemini_model,
@@ -675,8 +690,8 @@ Instructions:
             yield f"event: error\ndata: {json.dumps({'error': 'Google GenAI client is not configured.'})}\n\n"
             return
 
-        full_context = self._get_transcripts_context(market_filter=market_filter)
-        prompt = self._build_qa_prompt(query, full_context, streaming=True)
+        retrieved_context = self._get_retrieved_context(query, market_filter=market_filter)
+        prompt = self._build_qa_prompt(query, retrieved_context, streaming=True)
 
         try:
             stream = self.client.models.generate_content_stream(

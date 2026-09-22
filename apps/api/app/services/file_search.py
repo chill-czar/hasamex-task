@@ -130,6 +130,19 @@ class FileSearchService:
                 "fallback": "canonical_local_store",
             }
 
+    def get_file_search_tool(self) -> Optional[types.Tool]:
+        """Returns Google File Search Tool definition for models if store is available."""
+        if self.store_name and self.is_available():
+            try:
+                return types.Tool(
+                    file_search=types.FileSearch(
+                        file_search_store_names=[self.store_name]
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"Could not construct FileSearch tool: {e}")
+        return None
+
     def search_file_search_store(self, query: str, market: Optional[str] = None) -> List[Dict[str, Any]]:
         """Searches canonical segments for relevant context keywords."""
         stop_words = {
@@ -156,6 +169,8 @@ class FileSearchService:
                 "speaker": s.speaker,
                 "start_timestamp": s.start_timestamp,
                 "start_time_seconds": s.start_time_seconds,
+                "end_timestamp": s.end_timestamp,
+                "end_time_seconds": s.end_time_seconds,
                 "text": s.text,
             }
             for s in matches[:5]

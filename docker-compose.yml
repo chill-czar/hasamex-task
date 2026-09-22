@@ -29,7 +29,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://hasamex:hasamex_password@postgres:5432/hasamex_db
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.6-flash}
       - ENVIRONMENT=production
     volumes:
       - ./data:/app/data
@@ -45,6 +45,7 @@ services:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - INTERNAL_API_URL=http://api:8000
 
 volumes:
   postgres_data:
